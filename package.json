@@ -1,0 +1,24 @@
+{
+  "name": "calldove",
+  "version": "1.0.0",
+  "description": "Real-time phone translation service",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": ["translation", "twilio", "openai"],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "dotenv": "^17.2.4",
+    "express": "^5.2.1",
+    "mu-law": "^0.0.1",
+    "twilio": "^5.12.1",
+    "ws": "^8.19.0"
+  },
+  "engines": {
+    "node": ">=18.x"
+  }
+}
