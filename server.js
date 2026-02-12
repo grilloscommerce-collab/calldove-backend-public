@@ -1,214 +1,222 @@
 require('dotenv').config();
-const http = require('http');
 const express = require('express');
 const WebSocket = require('ws');
-const twilio = require('twilio');
+const { Encoder } = require('mu-law');
+const { MongoClient } = require('mongodb');
 
 const app = express();
-app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-const PORT = Number(process.env.PORT || 3000);
-const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, 
-'');
+const PORT = process.env.PORT || 3000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_REALTIME_MODEL = 'gpt-4o-realtime-preview-2024-12-17';
-const OPENAI_VOICE = 'shimmer';
+
+// MongoDB connection
+const MONGODB_URI = process.env.MONGODB_URI || 
+'mongodb+srv://calldove:Calldove2026@calldove-cluster.cgsphj9.mongodb.net/calldove?retryWrites=true&w=majority';
+let db = null;
+
+async function connectDB() {
+  if (db) return db;
+  const client = new MongoClient(MONGODB_URI);
+  await client.connect();
+  db = client.db('calldove');
+  console.log('MongoDB connected');
+  return db;
+}
+
+connectDB().catch(console.error);
 
 const LANGS = {
-  es: 'Spanish', en: 'English', zh: 'Mandarin', fr: 'French',
-  de: 'German', it: 'Italian', pt: 'Portuguese', ja: 'Japanese',
-  ko: 'Korean', nl: 'Dutch', ru: 'Russian'
+  es: 'Spanish',
+  en: 'English',
+  zh: 'Mandarin Chinese',
+  fr: 'French',
+  de: 'German',
+  it: 'Italian',
+  pt: 'Portuguese',
+  ja: 'Japanese',
+  ko: 'Korean',
+  nl: 'Dutch',
+  ru: 'Russian'
 };
 
 const callLanguages = new Map();
+
+// AUTH ENDPOINTS
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { email, password, phone } = req.body;
+    const database = await connectDB();
+    const users = database.collection('users');
+    
+    const existing = await users.findOne({ email });
+    if (existing) {
+      return res.status(400).json({ error: 'User already exists' });
+    }
+    
+    const user = {
+      email,
+      password,
+      phone,
+      createdAt: new Date(),
+      verified: false
+    };
+    
+    const result = await users.insertOne(user);
+    console.log('New user registered:', email);
+    
+    res.json({ success: true, userId: result.insertedId });
+  } catch (error) {
+    console.error('Registration error:', error);
+    res.status(500).json({ error: 'Registration failed' });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const database = await connectDB();
+    const users = database.collection('users');
+    
+    const user = await users.findOne({ email, password });
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    
+    console.log('Login successful:', email);
+    
+    res.json({ 
+      success: true, 
+      user: { 
+        email: user.email, 
+        phone: user.phone,
+        userId: user._id
+      }
+    });
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+app.get('/', (req, res) => {
+  res.send('CallDove Backend Running');
+});
 
 app.post('/voice', (req, res) => {
   const src = req.query.source || 'es';
   const tgt = req.query.target || 'en';
   const callSid = req.body.CallSid;
-  
-  console.log('DEBUG - CallSid:', callSid);
-  console.log('DEBUG - Source:', src, 'Target:', tgt);
-  
-  if (callSid) {
-    callLanguages.set(callSid, { source: src, target: tgt });
-  }
-  
-  const twiml = new twilio.twiml.VoiceResponse();
-  twiml.say({ voice: 'alice', language: 'es-ES' }, 'CallDove');
-  const connect = twiml.connect();
-  connect.stream({
-    url: PUBLIC_BASE_URL.replace(/^http/, 'ws') + '/media'
-  });
-  res.type('text/xml').send(twiml.toString());
+
+  callLanguages.set(callSid, { source: src, target: tgt });
+  console.log(`Call ${callSid}: ${src} <-> ${tgt}`);
+
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Connect>
+    <Stream url="wss://${req.headers.host}/media" />
+  </Connect>
+</Response>`;
+
+  res.type('text/xml').send(twiml);
 });
 
-app.get('/health', (req, res) => res.json({ ok: true }));
+const server = app.listen(PORT, () => {
+  console.log(`Server on port ${PORT}`);
+});
 
-const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/media' });
 
 wss.on('connection', (twilioWs, req) => {
-  let src = 'es', tgt = 'en';
+  console.log('Twilio WS connected');
   let callSid = null;
-  
-  let streamSid, openaiWs, ready = false, lastMark = 0, inProgress = 
-false;
-  
-  const safeSend = (ws, obj) => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(obj));
-    }
-  };
-  
-  const connectOpenAI = (srcName, tgtName) => {
-    const url = 'wss://api.openai.com/v1/realtime?model=' + 
-encodeURIComponent(OPENAI_REALTIME_MODEL);
-    openaiWs = new WebSocket(url, {
-      headers: {
-        'Authorization': 'Bearer ' + OPENAI_API_KEY,
-        'OpenAI-Beta': 'realtime=v1'
-      }
-    });
-    
-    openaiWs.on('open', () => {
-      console.log('OpenAI OK');
-      const instructions = 'Translate between ' + srcName + ' and ' + 
-tgtName + '. Hear ' + srcName + ' speak ' + tgtName + '. Hear ' + tgtName 
-+ ' speak ' + srcName + '. Direct only. Fast.';
-      safeSend(openaiWs, {
-        type: 'session.update',
-        session: {
-          modalities: ['text', 'audio'],
-          instructions: instructions,
-          voice: OPENAI_VOICE,
-          input_audio_format: 'g711_ulaw',
-          output_audio_format: 'g711_ulaw',
-          input_audio_transcription: { model: 'whisper-1' },
-          turn_detection: {
-            type: 'server_vad',
-            threshold: 0.5,
-            prefix_padding_ms: 300,
-            silence_duration_ms: 600
-          },
-          temperature: 0.7,
-          max_response_output_tokens: 150
-        }
-      });
-      ready = true;
-    });
-    
-    openaiWs.on('message', (buffer) => {
-      let event;
-      try {
-        event = JSON.parse(buffer.toString());
-      } catch (e) {
-        return;
-      }
-      
-      if (event.type === 'response.audio.delta' && event.delta && 
-streamSid) {
-        safeSend(twilioWs, {
-          event: 'media',
-          streamSid: streamSid,
-          media: { payload: event.delta }
-        });
-        const now = Date.now();
-        if (now - lastMark > 1000) {
-          lastMark = now;
-          safeSend(twilioWs, {
-            event: 'mark',
-            streamSid: streamSid,
-            mark: { name: 'm_' + now }
-          });
-        }
-      }
-      
-      if (event.type === 'input_audio_buffer.speech_started') {
-        if (inProgress && streamSid) {
-          safeSend(twilioWs, { event: 'clear', streamSid: streamSid });
-          safeSend(openaiWs, { type: 'response.cancel' });
-          inProgress = false;
-        }
-      }
-      
-      if (event.type === 'input_audio_buffer.speech_stopped') {
-        if (!inProgress) {
-          inProgress = true;
-          safeSend(openaiWs, { type: 'response.create' });
-        }
-      }
-      
-      if (event.type === 'response.done') {
-        inProgress = false;
-      }
-    });
-    
-    openaiWs.on('close', () => {
-      ready = false;
-      inProgress = false;
-    });
-    
-    openaiWs.on('error', (err) => {
-      console.error('OpenAI:', err.message);
-    });
-  };
-  
+  let openaiWs = null;
+  let streamSid = null;
+  let src = 'es';
+  let tgt = 'en';
+
   twilioWs.on('message', (msg) => {
-    let data;
     try {
-      data = JSON.parse(msg.toString());
-    } catch (e) {
-      return;
-    }
-    
-    if (data.event === 'start') {
-      streamSid = (data.start && data.start.streamSid) || data.streamSid;
-      callSid = (data.start && data.start.callSid) || null;
-      
-      console.log('Stream OK - CallSid:', callSid);
-      
-      if (callSid && callLanguages.has(callSid)) {
-        const langs = callLanguages.get(callSid);
-        src = langs.source;
-        tgt = langs.target;
-        callLanguages.delete(callSid);
+      const data = JSON.parse(msg);
+
+      if (data.event === 'start') {
+        callSid = data.start.callSid;
+        streamSid = data.start.streamSid;
+
+        if (callLanguages.has(callSid)) {
+          const langs = callLanguages.get(callSid);
+          src = langs.source;
+          tgt = langs.target;
+          callLanguages.delete(callSid);
+        }
+
+        const srcName = LANGS[src] || 'Spanish';
+        const tgtName = LANGS[tgt] || 'English';
+        console.log(`Connection: ${srcName} <-> ${tgtName}`);
+
+        openaiWs = new 
+WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17', {
+          headers: {
+            'Authorization': `Bearer ${OPENAI_API_KEY}`,
+            'OpenAI-Beta': 'realtime=v1'
+          }
+        });
+
+        openaiWs.on('open', () => {
+          console.log('OpenAI WS connected');
+          openaiWs.send(JSON.stringify({
+            type: 'session.update',
+            session: {
+              modalities: ['audio', 'text'],
+              instructions: `You are a real-time translator. The user speaks ${srcName}. 
+You must respond ONLY in ${tgtName}. Translate their message naturally and 
+conversationally into ${tgtName}. Do not add extra commentary, just translate.`,
+              voice: 'shimmer',
+              input_audio_format: 'g711_ulaw',
+              output_audio_format: 'g711_ulaw',
+              turn_detection: { type: 'server_vad' }
+            }
+          }));
+        });
+
+        openaiWs.on('message', (data) => {
+          try {
+            const event = JSON.parse(data);
+            if (event.type === 'response.audio.delta' && event.delta) {
+              twilioWs.send(JSON.stringify({
+                event: 'media',
+                streamSid,
+                media: { payload: event.delta }
+              }));
+            }
+          } catch (err) {
+            console.error('OpenAI message error:', err);
+          }
+        });
+
+        openaiWs.on('error', (err) => console.error('OpenAI error:', err));
+        openaiWs.on('close', () => console.log('OpenAI WS closed'));
       }
-      
-      const srcName = LANGS[src] || 'Spanish';
-      const tgtName = LANGS[tgt] || 'English';
-      
-      console.log('Conexion:', srcName, '<->', tgtName);
-      connectOpenAI(srcName, tgtName);
-    }
-    
-    if (data.event === 'media' && data.media && data.media.payload) {
-      if (openaiWs && ready && openaiWs.readyState === WebSocket.OPEN) {
-        safeSend(openaiWs, {
+
+      if (data.event === 'media' && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+        openaiWs.send(JSON.stringify({
           type: 'input_audio_buffer.append',
           audio: data.media.payload
-        });
+        }));
       }
-    }
-    
-    if (data.event === 'stop') {
-      if (callSid) {
-        callLanguages.delete(callSid);
-      }
-      twilioWs.close();
-    }
-  });
-  
-  twilioWs.on('close', () => {
-    if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-      openaiWs.close();
-    }
-  });
-});
 
-server.listen(PORT, () => {
-  console.log('CALLDOVE Multi-Language');
-  console.log('URL:', PUBLIC_BASE_URL);
-  console.log('Idiomas:', Object.keys(LANGS).join(', '));
+      if (data.event === 'stop') {
+        console.log('Call ended');
+        if (openaiWs) openaiWs.close();
+      }
+    } catch (err) {
+      console.error('Twilio message error:', err);
+    }
+  });
+
+  twilioWs.on('close', () => {
+    console.log('Twilio WS closed');
+    if (openaiWs) openaiWs.close();
+  });
 });
