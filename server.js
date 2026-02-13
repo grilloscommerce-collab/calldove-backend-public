@@ -35,30 +35,23 @@ app.get('/', (req, res) => {
   res.send('Calldove Translation Server Running');
 });
 
-app.post('/api/auth/verify-code', async (req, res) => {
+app.post('/api/auth/register', async (req, res) => {
   try {
-    const { phone, code } = req.body;
+    const { email, password, phone } = req.body;
+    const db = await connectDB();
     
-    const verification = await twilioClient.verify.v2
-      .services('VAfda39f88eaabea55df09f201fa193108')
-      .verificationChecks
-      .create({ to: phone, code: code });
-    
-    if (verification.status === 'approved') {
-      const db = await connectDB();
-      await db.collection('users').updateOne(
-        { phone },
-        { $set: { verified: true } }
-      );
-      res.json({ success: true });
-    } else {
-      res.json({ error: 'Invalid code' });
+    const existingUser = await db.collection('users').findOne({ email });
+    if (existingUser) {
+      return res.json({ error: 'User already exists' });
     }
-  } catch (error) {
-    console.error('Verify code error:', error);
-    res.json({ error: 'Verification failed' });
-  }
-});
+    
+    const result = await db.collection('users').insertOne({
+      email,
+      password,
+      phone,
+      verified: false,
+      createdAt: new Date()
+    });
     
     res.json({ success: true, userId: result.insertedId.toString() });
   } catch (error) {
@@ -95,21 +88,10 @@ app.post('/api/auth/send-verification', async (req, res) => {
   try {
     const { phone } = req.body;
     
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    
-    const db = await connectDB();
-    await db.collection('verification_codes').insertOne({
-      phone,
-      code,
-      createdAt: new Date(),
-      expiresAt: new Date(Date.now() + 5 * 60 * 1000)
-    });
-    
-await twilioClient.messages.create({
-      body: `Tu codigo de verificacion Calldove es: ${code}`,
-      messagingServiceSid: 'MG5282626be74c5b42d063ab58f4e34828',
-      to: phone
-    });
+    await twilioClient.verify.v2
+      .services('VAfda39f88eaabea55df09f201fa193108')
+      .verifications
+      .create({ to: phone, channel: 'sms' });
     
     res.json({ success: true });
   } catch (error) {
@@ -122,25 +104,21 @@ app.post('/api/auth/verify-code', async (req, res) => {
   try {
     const { phone, code } = req.body;
     
-    const db = await connectDB();
-    const verification = await db.collection('verification_codes').findOne({
-      phone,
-      code,
-      expiresAt: { $gt: new Date() }
-    });
+    const verification = await twilioClient.verify.v2
+      .services('VAfda39f88eaabea55df09f201fa193108')
+      .verificationChecks
+      .create({ to: phone, code: code });
     
-    if (!verification) {
-      return res.json({ error: 'Invalid or expired code' });
+    if (verification.status === 'approved') {
+      const db = await connectDB();
+      await db.collection('users').updateOne(
+        { phone },
+        { $set: { verified: true } }
+      );
+      res.json({ success: true });
+    } else {
+      res.json({ error: 'Invalid code' });
     }
-    
-    await db.collection('users').updateOne(
-      { phone },
-      { $set: { verified: true } }
-    );
-    
-    await db.collection('verification_codes').deleteOne({ _id: verification._id });
-    
-    res.json({ success: true });
   } catch (error) {
     console.error('Verify code error:', error);
     res.json({ error: 'Verification failed' });
