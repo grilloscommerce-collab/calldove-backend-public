@@ -35,23 +35,30 @@ app.get('/', (req, res) => {
   res.send('Calldove Translation Server Running');
 });
 
-app.post('/api/auth/register', async (req, res) => {
+app.post('/api/auth/verify-code', async (req, res) => {
   try {
-    const { email, password, phone } = req.body;
-    const db = await connectDB();
+    const { phone, code } = req.body;
     
-    const existingUser = await db.collection('users').findOne({ email });
-    if (existingUser) {
-      return res.json({ error: 'User already exists' });
+    const verification = await twilioClient.verify.v2
+      .services('VAfda39f88eaabea55df09f201fa193108')
+      .verificationChecks
+      .create({ to: phone, code: code });
+    
+    if (verification.status === 'approved') {
+      const db = await connectDB();
+      await db.collection('users').updateOne(
+        { phone },
+        { $set: { verified: true } }
+      );
+      res.json({ success: true });
+    } else {
+      res.json({ error: 'Invalid code' });
     }
-    
-    const result = await db.collection('users').insertOne({
-      email,
-      password,
-      phone,
-      verified: false,
-      createdAt: new Date()
-    });
+  } catch (error) {
+    console.error('Verify code error:', error);
+    res.json({ error: 'Verification failed' });
+  }
+});
     
     res.json({ success: true, userId: result.insertedId.toString() });
   } catch (error) {
