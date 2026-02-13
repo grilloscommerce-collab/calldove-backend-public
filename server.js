@@ -1,19 +1,20 @@
+cd ~/calldove
+cat > server.js << 'EOF'
 require('dotenv').config();
 const express = require('express');
 const WebSocket = require('ws');
-const { Encoder } = require('mu-law');
+const twilio = require('twilio');
 const { MongoClient } = require('mongodb');
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-const PORT = process.env.PORT || 3000;
+const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const PORT = process.env.PORT || 3000;
+const MONGODB_URI = process.env.MONGODB_URI;
 
-// MongoDB connection
-const MONGODB_URI = process.env.MONGODB_URI || 
-'mongodb+srv://calldove:Calldove2026@calldove-cluster.cgsphj9.mongodb.net/calldove?retryWrites=true&w=majority';
 let db = null;
 
 async function connectDB() {
@@ -25,137 +26,162 @@ async function connectDB() {
   return db;
 }
 
-connectDB().catch(console.error);
-
-const LANGS = {
-  es: 'Spanish',
-  en: 'English',
-  zh: 'Mandarin Chinese',
-  fr: 'French',
-  de: 'German',
-  it: 'Italian',
-  pt: 'Portuguese',
-  ja: 'Japanese',
-  ko: 'Korean',
-  nl: 'Dutch',
-  ru: 'Russian'
+const languageMap = {
+  'es': 'es', 'en': 'en', 'zh': 'zh', 'fr': 'fr', 'de': 'de',
+  'it': 'it', 'pt': 'pt', 'ja': 'ja', 'ko': 'ko', 'ar': 'ar', 'hi': 'hi'
 };
 
 const callLanguages = new Map();
 
-// AUTH ENDPOINTS
+app.get('/', (req, res) => {
+  res.send('Calldove Translation Server Running');
+});
+
+// Auth endpoints
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { email, password, phone } = req.body;
-    const database = await connectDB();
-    const users = database.collection('users');
+    const db = await connectDB();
     
-    const existing = await users.findOne({ email });
-    if (existing) {
-      return res.status(400).json({ error: 'User already exists' });
+    const existingUser = await db.collection('users').findOne({ email });
+    if (existingUser) {
+      return res.json({ error: 'User already exists' });
     }
     
-    const user = {
+    const result = await db.collection('users').insertOne({
       email,
       password,
       phone,
-      createdAt: new Date(),
-      verified: false
-    };
+      verified: false,
+      createdAt: new Date()
+    });
     
-    const result = await users.insertOne(user);
-    console.log('New user registered:', email);
-    
-    res.json({ success: true, userId: result.insertedId });
+    res.json({ success: true, userId: result.insertedId.toString() });
   } catch (error) {
     console.error('Registration error:', error);
-    res.status(500).json({ error: 'Registration failed' });
+    res.json({ error: 'Registration failed' });
   }
 });
 
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    const database = await connectDB();
-    const users = database.collection('users');
+    const db = await connectDB();
     
-    const user = await users.findOne({ email, password });
+    const user = await db.collection('users').findOne({ email, password });
     if (!user) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
     
-    console.log('Login successful:', email);
-    
-    res.json({ 
-      success: true, 
-      user: { 
-        email: user.email, 
+    res.json({
+      success: true,
+      user: {
+        email: user.email,
         phone: user.phone,
-        userId: user._id
+        userId: user._id.toString()
       }
     });
   } catch (error) {
     console.error('Login error:', error);
-    res.status(500).json({ error: 'Login failed' });
+    res.json({ error: 'Login failed' });
   }
 });
 
-app.get('/', (req, res) => {
-  res.send('CallDove Backend Running');
+// Send verification SMS
+app.post('/api/auth/send-verification', async (req, res) => {
+  try {
+    const { phone } = req.body;
+    
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    
+    const db = await connectDB();
+    await db.collection('verification_codes').insertOne({
+      phone,
+      code,
+      createdAt: new Date(),
+      expiresAt: new Date(Date.now() + 5 * 60 * 1000)
+    });
+    
+    await twilioClient.messages.create({
+      body: `Tu codigo de verificacion Calldove es: ${code}`,
+      from: process.env.TWILIO_PHONE_NUMBER,
+      to: phone
+    });
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Send verification error:', error);
+    res.json({ error: 'Failed to send verification code' });
+  }
 });
 
-app.post('/voice', (req, res) => {
-  const src = req.query.source || 'es';
-  const tgt = req.query.target || 'en';
+// Verify SMS code
+app.post('/api/auth/verify-code', async (req, res) => {
+  try {
+    const { phone, code } = req.body;
+    
+    const db = await connectDB();
+    const verification = await db.collection('verification_codes').findOne({
+      phone,
+      code,
+      expiresAt: { $gt: new Date() }
+    });
+    
+    if (!verification) {
+      return res.json({ error: 'Invalid or expired code' });
+    }
+    
+    await db.collection('users').updateOne(
+      { phone },
+      { $set: { verified: true } }
+    );
+    
+    await db.collection('verification_codes').deleteOne({ _id: verification._id });
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Verify code error:', error);
+    res.json({ error: 'Verification failed' });
+  }
+});
+
+app.post('/voice', async (req, res) => {
+  const source = req.query.source || 'es';
+  const target = req.query.target || 'en';
   const callSid = req.body.CallSid;
 
-  callLanguages.set(callSid, { source: src, target: tgt });
-  console.log(`Call ${callSid}: ${src} <-> ${tgt}`);
+  callLanguages.set(callSid, { source, target });
 
-  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Connect>
-    <Stream url="wss://${req.headers.host}/media" />
-  </Connect>
-</Response>`;
+  const response = `<?xml version="1.0" encoding="UTF-8"?>
+    <Response>
+      <Connect>
+        <Stream url="wss://${req.headers.host}/media-stream">
+          <Parameter name="callSid" value="${callSid}" />
+        </Stream>
+      </Connect>
+    </Response>`;
 
-  res.type('text/xml').send(twiml);
+  res.type('text/xml');
+  res.send(response);
 });
 
-const server = app.listen(PORT, () => {
-  console.log(`Server on port ${PORT}`);
-});
+const wss = new WebSocket.Server({ noServer: true });
 
-const wss = new WebSocket.Server({ server, path: '/media' });
-
-wss.on('connection', (twilioWs, req) => {
-  console.log('Twilio WS connected');
+wss.on('connection', (ws) => {
   let callSid = null;
-  let openaiWs = null;
+  let openAiWs = null;
   let streamSid = null;
-  let src = 'es';
-  let tgt = 'en';
 
-  twilioWs.on('message', (msg) => {
+  ws.on('message', (message) => {
     try {
-      const data = JSON.parse(msg);
+      const msg = JSON.parse(message);
 
-      if (data.event === 'start') {
-        callSid = data.start.callSid;
-        streamSid = data.start.streamSid;
+      if (msg.event === 'start') {
+        callSid = msg.start.callSid;
+        streamSid = msg.start.streamSid;
+        const langs = callLanguages.get(callSid) || { source: 'es', target: 'en' };
 
-        if (callLanguages.has(callSid)) {
-          const langs = callLanguages.get(callSid);
-          src = langs.source;
-          tgt = langs.target;
-          callLanguages.delete(callSid);
-        }
-
-        const srcName = LANGS[src] || 'Spanish';
-        const tgtName = LANGS[tgt] || 'English';
-        console.log(`Connection: ${srcName} <-> ${tgtName}`);
-
-        openaiWs = new 
+        openAiWs = new 
 WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17', {
           headers: {
             'Authorization': `Bearer ${OPENAI_API_KEY}`,
@@ -163,60 +189,78 @@ WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-1
           }
         });
 
-        openaiWs.on('open', () => {
-          console.log('OpenAI WS connected');
-          openaiWs.send(JSON.stringify({
+        openAiWs.on('open', () => {
+          openAiWs.send(JSON.stringify({
             type: 'session.update',
             session: {
-              modalities: ['audio', 'text'],
-              instructions: `You are a real-time translator. The user speaks ${srcName}. 
-You must respond ONLY in ${tgtName}. Translate their message naturally and 
-conversationally into ${tgtName}. Do not add extra commentary, just translate.`,
-              voice: 'shimmer',
+              turn_detection: { type: 'server_vad' },
               input_audio_format: 'g711_ulaw',
               output_audio_format: 'g711_ulaw',
-              turn_detection: { type: 'server_vad' }
+              voice: 'alloy',
+              instructions: `You are a real-time translator. Translate spoken 
+${languageMap[langs.source]} to ${languageMap[langs.target]}. Output ONLY the translation, no extra 
+text.`,
+              modalities: ['text', 'audio'],
+              temperature: 0.8,
+              input_audio_transcription: { model: 'whisper-1' }
             }
           }));
         });
 
-        openaiWs.on('message', (data) => {
+        openAiWs.on('message', (data) => {
           try {
-            const event = JSON.parse(data);
-            if (event.type === 'response.audio.delta' && event.delta) {
-              twilioWs.send(JSON.stringify({
+            const response = JSON.parse(data);
+
+            if (response.type === 'response.audio.delta' && response.delta) {
+              ws.send(JSON.stringify({
                 event: 'media',
-                streamSid,
-                media: { payload: event.delta }
+                streamSid: streamSid,
+                media: { payload: response.delta }
               }));
             }
-          } catch (err) {
-            console.error('OpenAI message error:', err);
+          } catch (error) {
+            console.error('Error processing OpenAI message:', error.message);
           }
         });
 
-        openaiWs.on('error', (err) => console.error('OpenAI error:', err));
-        openaiWs.on('close', () => console.log('OpenAI WS closed'));
+        openAiWs.on('error', (error) => console.error('OpenAI WebSocket error:', error));
+        openAiWs.on('close', () => console.log('OpenAI WebSocket closed'));
       }
 
-      if (data.event === 'media' && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-        openaiWs.send(JSON.stringify({
+      if (msg.event === 'media' && openAiWs && openAiWs.readyState === WebSocket.OPEN) {
+        openAiWs.send(JSON.stringify({
           type: 'input_audio_buffer.append',
-          audio: data.media.payload
+          audio: msg.media.payload
         }));
       }
 
-      if (data.event === 'stop') {
-        console.log('Call ended');
-        if (openaiWs) openaiWs.close();
+      if (msg.event === 'stop') {
+        if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
+          openAiWs.close();
+        }
+        if (callSid) {
+          callLanguages.delete(callSid);
+        }
       }
-    } catch (err) {
-      console.error('Twilio message error:', err);
+    } catch (error) {
+      console.error('Error handling message:', error.message);
     }
   });
 
-  twilioWs.on('close', () => {
-    console.log('Twilio WS closed');
-    if (openaiWs) openaiWs.close();
+  ws.on('close', () => {
+    if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
+      openAiWs.close();
+    }
   });
 });
+
+const server = app.listen(PORT, () => {
+  console.log(`Server on port ${PORT}`);
+});
+
+server.on('upgrade', (request, socket, head) => {
+  wss.handleUpgrade(request, socket, head, (ws) => {
+    wss.emit('connection', ws, request);
+  });
+});
+EOF
