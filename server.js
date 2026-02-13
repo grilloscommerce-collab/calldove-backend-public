@@ -1,5 +1,3 @@
-cd ~/calldove
-cat > server.js << 'EOF'
 require('dotenv').config();
 const express = require('express');
 const WebSocket = require('ws');
