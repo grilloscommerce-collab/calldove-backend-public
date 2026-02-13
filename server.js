@@ -125,6 +125,38 @@ app.post('/api/auth/verify-code', async (req, res) => {
   }
 });
 
+app.post('/api/generate-token', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    
+    const AccessToken = twilio.jwt.AccessToken;
+    const VoiceGrant = AccessToken.VoiceGrant;
+
+    const voiceGrant = new VoiceGrant({
+      outgoingApplicationSid: process.env.TWILIO_TWIML_APP_SID,
+      incomingAllow: true
+    });
+
+    const token = new AccessToken(
+      process.env.TWILIO_ACCOUNT_SID,
+      process.env.TWILIO_API_KEY,
+      process.env.TWILIO_API_SECRET,
+      { identity: userId }
+    );
+
+    token.addGrant(voiceGrant);
+
+    res.json({
+      success: true,
+      token: token.toJwt(),
+      identity: userId
+    });
+  } catch (error) {
+    console.error('Generate token error:', error);
+    res.json({ error: 'Failed to generate token' });
+  }
+});
+
 app.post('/voice', async (req, res) => {
   const source = req.query.source || 'es';
   const target = req.query.target || 'en';
@@ -161,7 +193,8 @@ wss.on('connection', (ws) => {
         streamSid = msg.start.streamSid;
         const langs = callLanguages.get(callSid) || { source: 'es', target: 'en' };
 
-        openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17', {
+        openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17', 
+{
           headers: {
             'Authorization': `Bearer ${OPENAI_API_KEY}`,
             'OpenAI-Beta': 'realtime=v1'
