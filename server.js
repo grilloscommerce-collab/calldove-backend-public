@@ -98,9 +98,9 @@ app.post('/api/auth/send-verification', async (req, res) => {
       expiresAt: new Date(Date.now() + 5 * 60 * 1000)
     });
     
-    await twilioClient.messages.create({
+await twilioClient.messages.create({
       body: `Tu codigo de verificacion Calldove es: ${code}`,
-      from: process.env.TWILIO_PHONE_NUMBER,
+      messagingServiceSid: 'MG5282626be74c5b42d063ab58f4e34828',
       to: phone
     });
     
