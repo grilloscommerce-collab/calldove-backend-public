@@ -174,18 +174,18 @@ app.post('/voice', async (req, res) => {
 
   callLanguages.set(callSid, { source, target });
 
-const response = `<?xml version="1.0" encoding="UTF-8"?>
-    <Response>
-      <Say>Connecting to translation service</Say>
-      <Connect>
-        <Stream url="wss://${req.headers.host}/media-stream">
-          <Parameter name="callSid" value="${callSid}" />
-        </Stream>
-      </Connect>
-    </Response>`;
+  const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>Connecting to translation service</Say>
+  <Connect>
+    <Stream url="wss://${req.headers.host}/media-stream">
+      <Parameter name="callSid" value="${callSid}" />
+    </Stream>
+  </Connect>
+</Response>`;
 
   res.type('text/xml');
-  res.send(response);
+  res.send(twimlResponse);
 });
 
 const wss = new WebSocket.Server({ noServer: true });
@@ -208,7 +208,7 @@ wss.on('connection', (ws) => {
         console.log(`Stream started - CallSid: ${callSid}, source: ${langs.source}, target: ${langs.target}`);
 
         openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview', {
-
+          headers: {
             'Authorization': `Bearer ${OPENAI_API_KEY}`,
             'OpenAI-Beta': 'realtime=v1'
           }
