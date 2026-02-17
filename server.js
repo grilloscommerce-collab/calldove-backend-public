@@ -35,6 +35,14 @@ app.get('/', (req, res) => {
   res.send('Calldove Translation Server Running');
 });
 
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    websocket_clients: wss.clients.size,
+    timestamp: new Date().toISOString() 
+  });
+});
+
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { email, password, phone } = req.body;
@@ -162,6 +170,8 @@ app.post('/voice', async (req, res) => {
   const target = req.query.target || 'en';
   const callSid = req.body.CallSid;
 
+  console.log(`Voice webhook called - CallSid: ${callSid}, source: ${source}, target: ${target}`);
+
   callLanguages.set(callSid, { source, target });
 
   const response = `<?xml version="1.0" encoding="UTF-8"?>
@@ -180,6 +190,7 @@ app.post('/voice', async (req, res) => {
 const wss = new WebSocket.Server({ noServer: true });
 
 wss.on('connection', (ws) => {
+  console.log('WebSocket connection established');
   let callSid = null;
   let openAiWs = null;
   let streamSid = null;
@@ -193,8 +204,9 @@ wss.on('connection', (ws) => {
         streamSid = msg.start.streamSid;
         const langs = callLanguages.get(callSid) || { source: 'es', target: 'en' };
 
-        openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17', 
-{
+        console.log(`Stream started - CallSid: ${callSid}, source: ${langs.source}, target: ${langs.target}`);
+
+        openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17', {
           headers: {
             'Authorization': `Bearer ${OPENAI_API_KEY}`,
             'OpenAI-Beta': 'realtime=v1'
@@ -202,6 +214,7 @@ wss.on('connection', (ws) => {
         });
 
         openAiWs.on('open', () => {
+          console.log('OpenAI WebSocket opened');
           openAiWs.send(JSON.stringify({
             type: 'session.update',
             session: {
@@ -246,6 +259,7 @@ ${languageMap[langs.target]}. Output ONLY the translation, no extra text.`,
       }
 
       if (msg.event === 'stop') {
+        console.log('Stream stopped');
         if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
           openAiWs.close();
         }
@@ -259,6 +273,7 @@ ${languageMap[langs.target]}. Output ONLY the translation, no extra text.`,
   });
 
   ws.on('close', () => {
+    console.log('WebSocket connection closed');
     if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
       openAiWs.close();
     }
@@ -270,7 +285,9 @@ const server = app.listen(PORT, () => {
 });
 
 server.on('upgrade', (request, socket, head) => {
+  console.log('WebSocket upgrade requested from:', request.url);
   wss.handleUpgrade(request, socket, head, (ws) => {
+    console.log('WebSocket upgrade successful');
     wss.emit('connection', ws, request);
   });
 });
