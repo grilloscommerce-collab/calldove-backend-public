@@ -206,8 +206,8 @@ wss.on('connection', (ws) => {
 
         console.log(`Stream started - CallSid: ${callSid}, source: ${langs.source}, target: ${langs.target}`);
 
-        openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17', {
-          headers: {
+        openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview', {
+
             'Authorization': `Bearer ${OPENAI_API_KEY}`,
             'OpenAI-Beta': 'realtime=v1'
           }
