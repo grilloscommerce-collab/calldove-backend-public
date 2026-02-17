@@ -207,7 +207,7 @@ wss.on('connection', (ws) => {
 
         console.log(`Stream started - CallSid: ${callSid}, source: ${langs.source}, target: ${langs.target}`);
 
-        openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview', {
+        openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime', {
           headers: {
             'Authorization': `Bearer ${OPENAI_API_KEY}`,
             'OpenAI-Beta': 'realtime=v1'
@@ -248,8 +248,13 @@ ${languageMap[langs.target]}. Output ONLY the translation, no extra text.`,
           }
         });
 
-        openAiWs.on('error', (error) => console.error('OpenAI WebSocket error:', error));
-        openAiWs.on('close', () => console.log('OpenAI WebSocket closed'));
+        openAiWs.on('error', (error) => {
+          console.error('OpenAI WebSocket error:', error);
+        });
+        
+        openAiWs.on('close', (code, reason) => {
+          console.log(`OpenAI WebSocket closed - Code: ${code}, Reason: ${reason}`);
+        });
       }
 
       if (msg.event === 'media' && openAiWs && openAiWs.readyState === WebSocket.OPEN) {
