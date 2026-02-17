@@ -174,8 +174,9 @@ app.post('/voice', async (req, res) => {
 
   callLanguages.set(callSid, { source, target });
 
-  const response = `<?xml version="1.0" encoding="UTF-8"?>
+const response = `<?xml version="1.0" encoding="UTF-8"?>
     <Response>
+      <Say>Connecting to translation service</Say>
       <Connect>
         <Stream url="wss://${req.headers.host}/media-stream">
           <Parameter name="callSid" value="${callSid}" />
