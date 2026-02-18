@@ -14,6 +14,7 @@ const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_A
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const PORT = process.env.PORT || 3000;
 const MONGODB_URI = process.env.MONGODB_URI;
+const BASE_URL = 'https://patient-respect-production-2602.up.railway.app';
 
 let db = null;
 
@@ -176,31 +177,51 @@ app.post('/api/generate-token', async (req, res) => {
 });
 
 app.post('/voice', async (req, res) => {
-  const source = req.query.source || 'es';
-  const target = req.query.target || 'en';
-  const callSid = req.body.CallSid;
+  try {
+    const source = req.query.source || 'es';
+    const target = req.query.target || 'en';
+    const callSid = req.body.CallSid;
 
-  console.log(`Voice webhook - CallSid: ${callSid}, ${source} → ${target}`);
-  callLanguages.set(callSid, { source, target });
+    console.log(`Voice webhook - CallSid: ${callSid}, ${source} → ${target}`);
+    callLanguages.set(callSid, { source, target });
 
-  const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
+    const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say>Translation ready. After the beep, speak in ${languageMap[source].name}.</Say>
   <Record maxLength="10" playBeep="true" transcribe="false" 
-action="https://${req.headers.host}/process-recording?source=${source}&target=${target}&callSid=${callSid}" />
+action="${BASE_URL}/process-recording?source=${source}&amp;target=${target}&amp;callSid=${callSid}" />
 </Response>`;
 
-  res.type('text/xml');
-  res.send(twimlResponse);
+    res.type('text/xml');
+    res.send(twimlResponse);
+  } catch (error) {
+    console.error('Voice webhook error:', error);
+    res.type('text/xml');
+    res.send('<Response><Say>Application error</Say><Hangup /></Response>');
+  }
 });
 
 app.post('/process-recording', async (req, res) => {
-  const { RecordingUrl } = req.body;
-  const { source, target, callSid } = req.query;
-  
-  console.log(`Processing recording: ${RecordingUrl}`);
-
   try {
+    const { RecordingUrl } = req.body;
+    const { source, target, callSid } = req.query;
+    
+    console.log(`Processing recording from ${source} to ${target}`);
+    console.log(`Recording URL: ${RecordingUrl}`);
+
+    if (!RecordingUrl) {
+      console.error('No recording URL provided');
+      const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>No recording received. Please try again.</Say>
+  <Record maxLength="10" playBeep="true" transcribe="false" 
+action="${BASE_URL}/process-recording?source=${source}&amp;target=${target}&amp;callSid=${callSid}" />
+</Response>`;
+      res.type('text/xml');
+      res.send(twiml);
+      return;
+    }
+
     const tmpFile = `/tmp/recording_${Date.now()}.wav`;
     const file = fs.createWriteStream(tmpFile);
     
@@ -211,8 +232,13 @@ app.post('/process-recording', async (req, res) => {
           file.close();
           resolve();
         });
-      }).on('error', reject);
+      }).on('error', (err) => {
+        console.error('Download error:', err);
+        reject(err);
+      });
     });
+
+    console.log('Audio downloaded, transcribing...');
 
     const transcription = await openai.audio.transcriptions.create({
       file: fs.createReadStream(tmpFile),
@@ -226,23 +252,23 @@ app.post('/process-recording', async (req, res) => {
       console.log('No speech detected');
       const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say>No speech detected. Please try again.</Say>
+  <Say>No speech detected. Please speak clearly after the beep.</Say>
   <Record maxLength="10" playBeep="true" transcribe="false" 
-action="https://${req.headers.host}/process-recording?source=${source}&target=${target}&callSid=${callSid}" />
+action="${BASE_URL}/process-recording?source=${source}&amp;target=${target}&amp;callSid=${callSid}" />
 </Response>`;
       res.type('text/xml');
       res.send(twiml);
       return;
     }
 
-    console.log(`Transcribed: "${transcription.text}"`);
+    console.log(`Transcribed (${source}): "${transcription.text}"`);
 
     const translation = await openai.chat.completions.create({
       model: 'gpt-4',
       messages: [{
         role: 'system',
         content: `Translate from ${languageMap[source].name} to ${languageMap[target].name}. Output ONLY the 
-translation.`
+translation, nothing else.`
       }, {
         role: 'user',
         content: transcription.text
@@ -251,24 +277,24 @@ translation.`
     });
 
     const translatedText = translation.choices[0].message.content.trim();
-    console.log(`Translated: "${translatedText}"`);
+    console.log(`Translated (${target}): "${translatedText}"`);
 
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say>${translatedText}</Say>
+  <Say>${translatedText.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</Say>
   <Say>Speak again after the beep.</Say>
   <Record maxLength="10" playBeep="true" transcribe="false" 
-action="https://${req.headers.host}/process-recording?source=${source}&target=${target}&callSid=${callSid}" />
+action="${BASE_URL}/process-recording?source=${source}&amp;target=${target}&amp;callSid=${callSid}" />
 </Response>`;
 
-    console.log('✅ Translation complete!');
+    console.log('✅ Translation sent successfully!');
     res.type('text/xml');
     res.send(twiml);
   } catch (error) {
-    console.error('Translation error:', error);
+    console.error('Process recording error:', error);
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say>Translation error. Please try again.</Say>
+  <Say>Translation error occurred. Hanging up.</Say>
   <Hangup />
 </Response>`;
     res.type('text/xml');
