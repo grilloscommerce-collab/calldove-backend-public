@@ -1,11 +1,10 @@
 require('dotenv').config();
 const express = require('express');
-const WebSocket = require('ws');
 const twilio = require('twilio');
 const { MongoClient } = require('mongodb');
 const OpenAI = require('openai');
+const https = require('https');
 const fs = require('fs');
-const { Readable } = require('stream');
 
 const app = express();
 app.use(express.json());
@@ -186,127 +185,53 @@ app.post('/voice', async (req, res) => {
 
   const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say>Translation ready. Speak in ${languageMap[source].name}.</Say>
-  <Connect>
-    <Stream url="wss://${req.headers.host}/media-stream">
-      <Parameter name="callSid" value="${callSid}" />
-    </Stream>
-  </Connect>
+  <Say>Translation ready. After the beep, speak in ${languageMap[source].name}.</Say>
+  <Record maxLength="10" playBeep="true" transcribe="false" 
+action="https://${req.headers.host}/process-recording?source=${source}&target=${target}&callSid=${callSid}" />
 </Response>`;
 
   res.type('text/xml');
   res.send(twimlResponse);
 });
 
-const wss = new WebSocket.Server({ noServer: true });
+app.post('/process-recording', async (req, res) => {
+  const { RecordingUrl } = req.body;
+  const { source, target, callSid } = req.query;
+  
+  console.log(`Processing recording: ${RecordingUrl}`);
 
-wss.on('connection', (ws) => {
-  console.log('WebSocket connected');
-  let callSid = null;
-  let streamSid = null;
-  let audioBuffer = [];
-  let isProcessing = false;
-  let langs = { source: 'es', target: 'en' };
-
-  ws.on('message', async (message) => {
-    try {
-      const msg = JSON.parse(message);
-
-      if (msg.event === 'start') {
-        callSid = msg.start.callSid;
-        streamSid = msg.start.streamSid;
-        langs = callLanguages.get(callSid) || { source: 'es', target: 'en' };
-        console.log(`Stream started: ${langs.source} → ${langs.target}`);
-      }
-
-      if (msg.event === 'media') {
-        audioBuffer.push(msg.media.payload);
-
-        if (audioBuffer.length >= 400 && !isProcessing) {
-          isProcessing = true;
-          const audioToProcess = audioBuffer.slice();
-          audioBuffer = [];
-
-          processAudio(audioToProcess, langs, streamSid, ws).finally(() => {
-            isProcessing = false;
-          });
-        }
-      }
-
-      if (msg.event === 'stop') {
-        console.log('Stream stopped');
-      }
-    } catch (error) {
-      console.error('WebSocket error:', error);
-    }
-  });
-
-  ws.on('close', () => {
-    console.log('WebSocket closed');
-    if (callSid) {
-      callLanguages.delete(callSid);
-    }
-  });
-});
-
-function mulawToWav(mulawBuffer) {
-  const wavHeader = Buffer.alloc(44);
-  const dataSize = mulawBuffer.length * 2;
-  const fileSize = dataSize + 36;
-
-  wavHeader.write('RIFF', 0);
-  wavHeader.writeUInt32LE(fileSize, 4);
-  wavHeader.write('WAVE', 8);
-  wavHeader.write('fmt ', 12);
-  wavHeader.writeUInt32LE(16, 16);
-  wavHeader.writeUInt16LE(1, 20);
-  wavHeader.writeUInt16LE(1, 22);
-  wavHeader.writeUInt32LE(8000, 24);
-  wavHeader.writeUInt32LE(16000, 28);
-  wavHeader.writeUInt16LE(2, 32);
-  wavHeader.writeUInt16LE(16, 34);
-  wavHeader.write('data', 36);
-  wavHeader.writeUInt32LE(dataSize, 40);
-
-  const mulawTable = new Int16Array(256);
-  for (let i = 0; i < 256; i++) {
-    let mulaw = ~i;
-    let sign = mulaw & 0x80;
-    let exponent = (mulaw >> 4) & 0x07;
-    let mantissa = mulaw & 0x0F;
-    let sample = ((mantissa << 3) + 0x84) << exponent;
-    sample = sign ? -sample : sample;
-    mulawTable[i] = sample;
-  }
-
-  const pcmBuffer = Buffer.alloc(mulawBuffer.length * 2);
-  for (let i = 0; i < mulawBuffer.length; i++) {
-    pcmBuffer.writeInt16LE(mulawTable[mulawBuffer[i]], i * 2);
-  }
-
-  return Buffer.concat([wavHeader, pcmBuffer]);
-}
-
-async function processAudio(audioChunks, langs, streamSid, ws) {
   try {
-    console.log(`Processing ${audioChunks.length} audio chunks...`);
-
-    const mulawData = Buffer.from(audioChunks.join(''), 'base64');
-    const wavData = mulawToWav(mulawData);
+    const tmpFile = `/tmp/recording_${Date.now()}.wav`;
+    const file = fs.createWriteStream(tmpFile);
     
-    const tmpFile = `/tmp/audio_${Date.now()}.wav`;
-    fs.writeFileSync(tmpFile, wavData);
+    await new Promise((resolve, reject) => {
+      https.get(`${RecordingUrl}.wav`, (response) => {
+        response.pipe(file);
+        file.on('finish', () => {
+          file.close();
+          resolve();
+        });
+      }).on('error', reject);
+    });
 
     const transcription = await openai.audio.transcriptions.create({
       file: fs.createReadStream(tmpFile),
       model: 'whisper-1',
-      language: langs.source
+      language: source
     });
 
     fs.unlinkSync(tmpFile);
 
     if (!transcription.text || transcription.text.trim().length === 0) {
       console.log('No speech detected');
+      const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>No speech detected. Please try again.</Say>
+  <Record maxLength="10" playBeep="true" transcribe="false" 
+action="https://${req.headers.host}/process-recording?source=${source}&target=${target}&callSid=${callSid}" />
+</Response>`;
+      res.type('text/xml');
+      res.send(twiml);
       return;
     }
 
@@ -316,8 +241,8 @@ async function processAudio(audioChunks, langs, streamSid, ws) {
       model: 'gpt-4',
       messages: [{
         role: 'system',
-        content: `Translate from ${languageMap[langs.source].name} to ${languageMap[langs.target].name}. Output 
-ONLY the translation.`
+        content: `Translate from ${languageMap[source].name} to ${languageMap[target].name}. Output ONLY the 
+translation.`
       }, {
         role: 'user',
         content: transcription.text
@@ -328,37 +253,29 @@ ONLY the translation.`
     const translatedText = translation.choices[0].message.content.trim();
     console.log(`Translated: "${translatedText}"`);
 
-    const speech = await openai.audio.speech.create({
-      model: 'tts-1',
-      voice: 'alloy',
-      input: translatedText,
-      response_format: 'mulaw'
-    });
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>${translatedText}</Say>
+  <Say>Speak again after the beep.</Say>
+  <Record maxLength="10" playBeep="true" transcribe="false" 
+action="https://${req.headers.host}/process-recording?source=${source}&target=${target}&callSid=${callSid}" />
+</Response>`;
 
-    const audioBuffer = Buffer.from(await speech.arrayBuffer());
-    const base64Audio = audioBuffer.toString('base64');
-
-    ws.send(JSON.stringify({
-      event: 'media',
-      streamSid: streamSid,
-      media: {
-        payload: base64Audio
-      }
-    }));
-
-    console.log('✅ Translation sent!');
+    console.log('✅ Translation complete!');
+    res.type('text/xml');
+    res.send(twiml);
   } catch (error) {
-    console.error('Process audio error:', error);
+    console.error('Translation error:', error);
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>Translation error. Please try again.</Say>
+  <Hangup />
+</Response>`;
+    res.type('text/xml');
+    res.send(twiml);
   }
-}
+});
 
 const server = app.listen(PORT, () => {
   console.log(`Server on port ${PORT}`);
-});
-
-server.on('upgrade', (request, socket, head) => {
-  console.log('WebSocket upgrade');
-  wss.handleUpgrade(request, socket, head, (ws) => {
-    wss.emit('connection', ws, request);
-  });
 });
