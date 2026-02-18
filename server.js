@@ -203,14 +203,13 @@ action="${BASE_URL}/process-recording?source=${source}&amp;target=${target}&amp;
 
 app.post('/process-recording', async (req, res) => {
   try {
-    const { RecordingUrl } = req.body;
+    const { RecordingSid } = req.body;
     const { source, target, callSid } = req.query;
     
-    console.log(`Processing recording from ${source} to ${target}`);
-    console.log(`Recording URL: ${RecordingUrl}`);
+    console.log(`Processing recording: ${RecordingSid}`);
 
-    if (!RecordingUrl) {
-      console.error('No recording URL provided');
+    if (!RecordingSid) {
+      console.error('No recording SID provided');
       const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say>No recording received. Please try again.</Say>
@@ -223,10 +222,20 @@ action="${BASE_URL}/process-recording?source=${source}&amp;target=${target}&amp;
     }
 
     const tmpFile = `/tmp/recording_${Date.now()}.wav`;
+    const downloadUrl = 
+`https://api.twilio.com/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Recordings/${RecordingSid}.wav`;
+    
     const file = fs.createWriteStream(tmpFile);
     
     await new Promise((resolve, reject) => {
-      https.get(`${RecordingUrl}.wav`, (response) => {
+      const auth = 
+Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
+      
+      https.get(downloadUrl, {
+        headers: {
+          'Authorization': `Basic ${auth}`
+        }
+      }, (response) => {
         response.pipe(file);
         file.on('finish', () => {
           file.close();
