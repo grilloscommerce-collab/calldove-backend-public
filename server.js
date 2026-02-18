@@ -236,18 +236,23 @@ ${languageMap[langs.target]}. Output ONLY the translation, speak naturally in ${
           openAiWs.send(JSON.stringify(sessionConfig));
         });
 
-        openAiWs.on('message', (data) => {
-          try {
-            const response = JSON.parse(data);
-            console.log('OpenAI event:', response.type);
+openAiWs.on('message', (data) => {
+  try {
+    const response = JSON.parse(data);
+    console.log('OpenAI event:', response.type);
 
-            if (response.type === 'response.output_audio.delta' && response.delta) {
-              ws.send(JSON.stringify({
-                event: 'media',
-                streamSid: streamSid,
-                media: { payload: response.delta }
-              }));
-            }
+    // Log full error details
+    if (response.type === 'error') {
+      console.error('OpenAI ERROR:', JSON.stringify(response, null, 2));
+    }
+
+    if (response.type === 'response.output_audio.delta' && response.delta) {
+      ws.send(JSON.stringify({
+        event: 'media',
+        streamSid: streamSid,
+        media: { payload: response.delta }
+      }));
+    }
           } catch (error) {
             console.error('Error processing OpenAI message:', error.message);
           }
