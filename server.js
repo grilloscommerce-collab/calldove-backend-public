@@ -4,6 +4,8 @@ const WebSocket = require('ws');
 const twilio = require('twilio');
 const { MongoClient } = require('mongodb');
 const OpenAI = require('openai');
+const fs = require('fs');
+const { Readable } = require('stream');
 
 const app = express();
 app.use(express.json());
@@ -184,7 +186,7 @@ app.post('/voice', async (req, res) => {
 
   const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say>Translation ready. Speak in ${languageMap[source].name} and hear ${languageMap[target].name}.</Say>
+  <Say>Translation ready. Speak in ${languageMap[source].name}.</Say>
   <Connect>
     <Stream url="wss://${req.headers.host}/media-stream">
       <Parameter name="callSid" value="${callSid}" />
@@ -220,13 +222,11 @@ wss.on('connection', (ws) => {
       if (msg.event === 'media') {
         audioBuffer.push(msg.media.payload);
 
-        // Process every 3 seconds of audio
         if (audioBuffer.length >= 150 && !isProcessing) {
           isProcessing = true;
           const audioToProcess = audioBuffer.slice();
           audioBuffer = [];
 
-          // Process in background
           processAudio(audioToProcess, langs, streamSid, ws).finally(() => {
             isProcessing = false;
           });
@@ -249,26 +249,61 @@ wss.on('connection', (ws) => {
   });
 });
 
+function mulawToWav(mulawBuffer) {
+  const wavHeader = Buffer.alloc(44);
+  const dataSize = mulawBuffer.length * 2;
+  const fileSize = dataSize + 36;
+
+  wavHeader.write('RIFF', 0);
+  wavHeader.writeUInt32LE(fileSize, 4);
+  wavHeader.write('WAVE', 8);
+  wavHeader.write('fmt ', 12);
+  wavHeader.writeUInt32LE(16, 16);
+  wavHeader.writeUInt16LE(1, 20);
+  wavHeader.writeUInt16LE(1, 22);
+  wavHeader.writeUInt32LE(8000, 24);
+  wavHeader.writeUInt32LE(16000, 28);
+  wavHeader.writeUInt16LE(2, 32);
+  wavHeader.writeUInt16LE(16, 34);
+  wavHeader.write('data', 36);
+  wavHeader.writeUInt32LE(dataSize, 40);
+
+  const mulawTable = new Int16Array(256);
+  for (let i = 0; i < 256; i++) {
+    let mulaw = ~i;
+    let sign = mulaw & 0x80;
+    let exponent = (mulaw >> 4) & 0x07;
+    let mantissa = mulaw & 0x0F;
+    let sample = ((mantissa << 3) + 0x84) << exponent;
+    sample = sign ? -sample : sample;
+    mulawTable[i] = sample;
+  }
+
+  const pcmBuffer = Buffer.alloc(mulawBuffer.length * 2);
+  for (let i = 0; i < mulawBuffer.length; i++) {
+    pcmBuffer.writeInt16LE(mulawTable[mulawBuffer[i]], i * 2);
+  }
+
+  return Buffer.concat([wavHeader, pcmBuffer]);
+}
+
 async function processAudio(audioChunks, langs, streamSid, ws) {
   try {
     console.log(`Processing ${audioChunks.length} audio chunks...`);
 
-    // Convert audio chunks to WAV
-    const audioData = Buffer.from(audioChunks.join(''), 'base64');
+    const mulawData = Buffer.from(audioChunks.join(''), 'base64');
+    const wavData = mulawToWav(mulawData);
     
-    // Save temporarily
-    const fs = require('fs');
     const tmpFile = `/tmp/audio_${Date.now()}.wav`;
-    fs.writeFileSync(tmpFile, audioData);
+    fs.writeFileSync(tmpFile, wavData);
 
-    // Transcribe with Whisper
     const transcription = await openai.audio.transcriptions.create({
       file: fs.createReadStream(tmpFile),
       model: 'whisper-1',
       language: langs.source
     });
 
-    fs.unlinkSync(tmpFile); // Clean up
+    fs.unlinkSync(tmpFile);
 
     if (!transcription.text || transcription.text.trim().length === 0) {
       console.log('No speech detected');
@@ -277,13 +312,12 @@ async function processAudio(audioChunks, langs, streamSid, ws) {
 
     console.log(`Transcribed: "${transcription.text}"`);
 
-    // Translate with GPT-4
     const translation = await openai.chat.completions.create({
       model: 'gpt-4',
       messages: [{
         role: 'system',
-        content: `You are a professional translator. Translate from ${languageMap[langs.source].name} to 
-${languageMap[langs.target].name}. Output ONLY the translation, nothing else. Be natural and conversational.`
+        content: `Translate from ${languageMap[langs.source].name} to ${languageMap[langs.target].name}. Output 
+ONLY the translation.`
       }, {
         role: 'user',
         content: transcription.text
@@ -294,19 +328,16 @@ ${languageMap[langs.target].name}. Output ONLY the translation, nothing else. Be
     const translatedText = translation.choices[0].message.content.trim();
     console.log(`Translated: "${translatedText}"`);
 
-    // Synthesize with TTS
     const speech = await openai.audio.speech.create({
       model: 'tts-1',
       voice: 'alloy',
       input: translatedText,
-      response_format: 'mulaw',
-      speed: 1.0
+      response_format: 'mulaw'
     });
 
     const audioBuffer = Buffer.from(await speech.arrayBuffer());
     const base64Audio = audioBuffer.toString('base64');
 
-    // Send audio back to caller
     ws.send(JSON.stringify({
       event: 'media',
       streamSid: streamSid,
@@ -315,7 +346,7 @@ ${languageMap[langs.target].name}. Output ONLY the translation, nothing else. Be
       }
     }));
 
-    console.log('Translation sent to caller');
+    console.log('✅ Translation sent!');
   } catch (error) {
     console.error('Process audio error:', error);
   }
