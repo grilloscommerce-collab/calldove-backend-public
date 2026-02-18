@@ -223,11 +223,15 @@ wss.on('connection', (ws) => {
               model: 'gpt-realtime',
               instructions: `You are a real-time translator. Translate spoken ${languageMap[langs.source]} to 
 ${languageMap[langs.target]}. Output ONLY the translation, speak naturally in ${languageMap[langs.target]}.`,
-              voice: 'alloy',
               input_audio_format: 'g711_ulaw',
               output_audio_format: 'g711_ulaw',
               turn_detection: {
                 type: 'server_vad'
+              },
+              audio: {
+                output: {
+                  voice: 'alloy'
+                }
               }
             }
           };
@@ -236,23 +240,22 @@ ${languageMap[langs.target]}. Output ONLY the translation, speak naturally in ${
           openAiWs.send(JSON.stringify(sessionConfig));
         });
 
-openAiWs.on('message', (data) => {
-  try {
-    const response = JSON.parse(data);
-    console.log('OpenAI event:', response.type);
+        openAiWs.on('message', (data) => {
+          try {
+            const response = JSON.parse(data);
+            console.log('OpenAI event:', response.type);
 
-    // Log full error details
-    if (response.type === 'error') {
-      console.error('OpenAI ERROR:', JSON.stringify(response, null, 2));
-    }
+            if (response.type === 'error') {
+              console.error('OpenAI ERROR:', JSON.stringify(response, null, 2));
+            }
 
-    if (response.type === 'response.output_audio.delta' && response.delta) {
-      ws.send(JSON.stringify({
-        event: 'media',
-        streamSid: streamSid,
-        media: { payload: response.delta }
-      }));
-    }
+            if (response.type === 'response.output_audio.delta' && response.delta) {
+              ws.send(JSON.stringify({
+                event: 'media',
+                streamSid: streamSid,
+                media: { payload: response.delta }
+              }));
+            }
           } catch (error) {
             console.error('Error processing OpenAI message:', error.message);
           }
