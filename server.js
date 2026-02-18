@@ -222,7 +222,7 @@ wss.on('connection', (ws) => {
       if (msg.event === 'media') {
         audioBuffer.push(msg.media.payload);
 
-        if (audioBuffer.length >= 150 && !isProcessing) {
+        if (audioBuffer.length >= 400 && !isProcessing) {
           isProcessing = true;
           const audioToProcess = audioBuffer.slice();
           audioBuffer = [];
