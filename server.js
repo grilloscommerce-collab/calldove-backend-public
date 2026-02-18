@@ -223,13 +223,15 @@ wss.on('connection', (ws) => {
               model: 'gpt-realtime',
               instructions: `You are a real-time translator. Translate spoken ${languageMap[langs.source]} to 
 ${languageMap[langs.target]}. Output ONLY the translation, speak naturally in ${languageMap[langs.target]}.`,
-              input_audio_format: 'g711_ulaw',
-              output_audio_format: 'g711_ulaw',
               turn_detection: {
                 type: 'server_vad'
               },
               audio: {
+                input: {
+                  format: 'g711_ulaw'
+                },
                 output: {
+                  format: 'g711_ulaw',
                   voice: 'alloy'
                 }
               }
