@@ -25,8 +25,8 @@ async function connectDB() {
 }
 
 const languageMap = {
-  'es': 'es', 'en': 'en', 'zh': 'zh', 'fr': 'fr', 'de': 'de',
-  'it': 'it', 'pt': 'pt', 'ja': 'ja', 'ko': 'ko', 'ar': 'ar', 'hi': 'hi'
+  'es': 'Spanish', 'en': 'English', 'zh': 'Chinese', 'fr': 'French', 'de': 'German',
+  'it': 'Italian', 'pt': 'Portuguese', 'ja': 'Japanese', 'ko': 'Korean', 'ar': 'Arabic', 'hi': 'Hindi'
 };
 
 const callLanguages = new Map();
@@ -207,34 +207,41 @@ wss.on('connection', (ws) => {
 
         console.log(`Stream started - CallSid: ${callSid}, source: ${langs.source}, target: ${langs.target}`);
 
-openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-realtime', {
-  headers: {
-    'Authorization': `Bearer ${OPENAI_API_KEY}`
-  }
-});
+        openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-realtime', {
+          headers: {
+            'Authorization': `Bearer ${OPENAI_API_KEY}`
+          }
+        });
+
         openAiWs.on('open', () => {
           console.log('OpenAI WebSocket opened');
-          openAiWs.send(JSON.stringify({
+          
+          const sessionConfig = {
             type: 'session.update',
             session: {
-              turn_detection: { type: 'server_vad' },
+              type: 'realtime',
+              model: 'gpt-realtime',
+              instructions: `You are a real-time translator. Translate spoken ${languageMap[langs.source]} to 
+${languageMap[langs.target]}. Output ONLY the translation, speak naturally in ${languageMap[langs.target]}.`,
+              voice: 'alloy',
               input_audio_format: 'g711_ulaw',
               output_audio_format: 'g711_ulaw',
-              voice: 'alloy',
-              instructions: `You are a real-time translator. Translate spoken ${languageMap[langs.source]} to 
-${languageMap[langs.target]}. Output ONLY the translation, no extra text.`,
-              modalities: ['text', 'audio'],
-              temperature: 0.8,
-              input_audio_transcription: { model: 'whisper-1' }
+              turn_detection: {
+                type: 'server_vad'
+              }
             }
-          }));
+          };
+
+          console.log('Sending session config:', JSON.stringify(sessionConfig));
+          openAiWs.send(JSON.stringify(sessionConfig));
         });
 
         openAiWs.on('message', (data) => {
           try {
             const response = JSON.parse(data);
+            console.log('OpenAI event:', response.type);
 
-            if (response.type === 'response.audio.delta' && response.delta) {
+            if (response.type === 'response.output_audio.delta' && response.delta) {
               ws.send(JSON.stringify({
                 event: 'media',
                 streamSid: streamSid,
