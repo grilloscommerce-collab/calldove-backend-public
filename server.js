@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const twilio = require('twilio');
-const { MongoClient } = require('mongodb');
+const { MongoClient, ObjectId } = require('mongodb');
 const OpenAI = require('openai');
 const https = require('https');
 const fs = require('fs');
@@ -43,8 +43,12 @@ const languageMap = {
 
 const callLanguages = new Map();
 
+// ==========================================
+// HEALTH & INFO
+// ==========================================
+
 app.get('/', (req, res) => {
-  res.send('Calldove Translation Server Running');
+  res.send('Talk2 Translation Server Running');
 });
 
 app.get('/health', (req, res) => {
@@ -53,6 +57,10 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString() 
   });
 });
+
+// ==========================================
+// AUTH ENDPOINTS
+// ==========================================
 
 app.post('/api/auth/register', async (req, res) => {
   try {
@@ -69,6 +77,7 @@ app.post('/api/auth/register', async (req, res) => {
       password,
       phone,
       verified: false,
+      preferredLanguage: 'en', // Default language
       createdAt: new Date()
     });
     
@@ -94,7 +103,8 @@ app.post('/api/auth/login', async (req, res) => {
       user: {
         email: user.email,
         phone: user.phone,
-        userId: user._id.toString()
+        userId: user._id.toString(),
+        preferredLanguage: user.preferredLanguage || 'en'
       }
     });
   } catch (error) {
@@ -175,6 +185,10 @@ app.post('/api/generate-token', async (req, res) => {
     res.json({ error: 'Failed to generate token' });
   }
 });
+
+// ==========================================
+// VOICE CALL ENDPOINTS
+// ==========================================
 
 app.post('/voice', async (req, res) => {
   try {
@@ -311,6 +325,161 @@ action="${BASE_URL}/process-recording?source=${source}&amp;target=${target}&amp;
   }
 });
 
+// ==========================================
+// CHAT ENDPOINTS
+// ==========================================
+
+// Get all conversations for a user
+app.get('/api/chats/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const db = await connectDB();
+    
+    const conversations = await db.collection('conversations')
+      .find({ 
+        participants: userId 
+      })
+      .sort({ lastMessageAt: -1 })
+      .toArray();
+    
+    res.json({ success: true, conversations });
+  } catch (error) {
+    console.error('Get chats error:', error);
+    res.json({ error: 'Failed to get chats' });
+  }
+});
+
+// Get messages in a conversation
+app.get('/api/messages/:conversationId', async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const db = await connectDB();
+    
+    const messages = await db.collection('messages')
+      .find({ conversationId })
+      .sort({ createdAt: 1 })
+      .limit(100)
+      .toArray();
+    
+    res.json({ success: true, messages });
+  } catch (error) {
+    console.error('Get messages error:', error);
+    res.json({ error: 'Failed to get messages' });
+  }
+});
+
+// Send message with translation
+app.post('/api/messages/send', async (req, res) => {
+  try {
+    const { senderId, recipientId, text, senderLanguage } = req.body;
+    const db = await connectDB();
+    
+    console.log(`New message from ${senderId} to ${recipientId}`);
+    
+    // Get or create conversation
+    let conversation = await db.collection('conversations').findOne({
+      participants: { $all: [senderId, recipientId] }
+    });
+    
+    if (!conversation) {
+      console.log('Creating new conversation');
+      const result = await db.collection('conversations').insertOne({
+        participants: [senderId, recipientId],
+        createdAt: new Date(),
+        lastMessageAt: new Date()
+      });
+      conversation = { _id: result.insertedId };
+    }
+    
+    // Get recipient's language preference
+    const recipient = await db.collection('users').findOne({ 
+      _id: new ObjectId(recipientId) 
+    });
+    const recipientLanguage = recipient?.preferredLanguage || 'en';
+    
+    console.log(`Translating message from ${senderLanguage} to ${recipientLanguage}`);
+    
+    // Translate if languages are different
+    let translatedText = text;
+    if (senderLanguage !== recipientLanguage) {
+      const translation = await openai.chat.completions.create({
+        model: 'gpt-4',
+        messages: [{
+          role: 'system',
+          content: `Translate from ${languageMap[senderLanguage].name} to ${languageMap[recipientLanguage].name}. 
+Output ONLY the translation, maintain the tone and style.`
+        }, {
+          role: 'user',
+          content: text
+        }],
+        temperature: 0.3
+      });
+      translatedText = translation.choices[0].message.content.trim();
+      console.log(`Original: "${text}" → Translated: "${translatedText}"`);
+    }
+    
+    // Save message with both versions
+    const message = {
+      conversationId: conversation._id.toString(),
+      senderId,
+      recipientId,
+      originalText: text,
+      originalLanguage: senderLanguage,
+      translatedText,
+      translatedLanguage: recipientLanguage,
+      createdAt: new Date(),
+      read: false
+    };
+    
+    const messageResult = await db.collection('messages').insertOne(message);
+    
+    // Update conversation
+    await db.collection('conversations').updateOne(
+      { _id: conversation._id },
+      { 
+        $set: { 
+          lastMessageAt: new Date(),
+          lastMessage: translatedText 
+        } 
+      }
+    );
+    
+    console.log('✅ Message sent and translated successfully!');
+    
+    res.json({ 
+      success: true, 
+      message: { ...message, _id: messageResult.insertedId }
+    });
+  } catch (error) {
+    console.error('Send message error:', error);
+    res.json({ error: 'Failed to send message' });
+  }
+});
+
+// Mark messages as read
+app.post('/api/messages/read', async (req, res) => {
+  try {
+    const { conversationId, userId } = req.body;
+    const db = await connectDB();
+    
+    await db.collection('messages').updateMany(
+      { conversationId, recipientId: userId, read: false },
+      { $set: { read: true } }
+    );
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Mark read error:', error);
+    res.json({ error: 'Failed to mark as read' });
+  }
+});
+
+// ==========================================
+// SERVER START
+// ==========================================
+
 const server = app.listen(PORT, () => {
-  console.log(`Server on port ${PORT}`);
+  console.log(`Talk2 Server running on port ${PORT}`);
+  console.log(`Chat endpoints: ✅`);
+  console.log(`Voice endpoints: ✅`);
 });
