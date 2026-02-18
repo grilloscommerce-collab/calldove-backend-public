@@ -3,13 +3,14 @@ const express = require('express');
 const WebSocket = require('ws');
 const twilio = require('twilio');
 const { MongoClient } = require('mongodb');
+const OpenAI = require('openai');
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const PORT = process.env.PORT || 3000;
 const MONGODB_URI = process.env.MONGODB_URI;
 
@@ -25,8 +26,17 @@ async function connectDB() {
 }
 
 const languageMap = {
-  'es': 'Spanish', 'en': 'English', 'zh': 'Chinese', 'fr': 'French', 'de': 'German',
-  'it': 'Italian', 'pt': 'Portuguese', 'ja': 'Japanese', 'ko': 'Korean', 'ar': 'Arabic', 'hi': 'Hindi'
+  'es': { code: 'es', name: 'Spanish' },
+  'en': { code: 'en', name: 'English' },
+  'zh': { code: 'zh', name: 'Chinese' },
+  'fr': { code: 'fr', name: 'French' },
+  'de': { code: 'de', name: 'German' },
+  'it': { code: 'it', name: 'Italian' },
+  'pt': { code: 'pt', name: 'Portuguese' },
+  'ja': { code: 'ja', name: 'Japanese' },
+  'ko': { code: 'ko', name: 'Korean' },
+  'ar': { code: 'ar', name: 'Arabic' },
+  'hi': { code: 'hi', name: 'Hindi' }
 };
 
 const callLanguages = new Map();
@@ -37,8 +47,7 @@ app.get('/', (req, res) => {
 
 app.get('/health', (req, res) => {
   res.json({ 
-    status: 'ok', 
-    websocket_clients: wss.clients.size,
+    status: 'ok',
     timestamp: new Date().toISOString() 
   });
 });
@@ -170,13 +179,12 @@ app.post('/voice', async (req, res) => {
   const target = req.query.target || 'en';
   const callSid = req.body.CallSid;
 
-  console.log(`Voice webhook called - CallSid: ${callSid}, source: ${source}, target: ${target}`);
-
+  console.log(`Voice webhook - CallSid: ${callSid}, ${source} → ${target}`);
   callLanguages.set(callSid, { source, target });
 
   const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say>Connecting to translation service</Say>
+  <Say>Translation ready. Speak in ${languageMap[source].name} and hear ${languageMap[target].name}.</Say>
   <Connect>
     <Stream url="wss://${req.headers.host}/media-stream">
       <Parameter name="callSid" value="${callSid}" />
@@ -191,111 +199,135 @@ app.post('/voice', async (req, res) => {
 const wss = new WebSocket.Server({ noServer: true });
 
 wss.on('connection', (ws) => {
-  console.log('WebSocket connection established');
+  console.log('WebSocket connected');
   let callSid = null;
-  let openAiWs = null;
   let streamSid = null;
+  let audioBuffer = [];
+  let isProcessing = false;
+  let langs = { source: 'es', target: 'en' };
 
-  ws.on('message', (message) => {
+  ws.on('message', async (message) => {
     try {
       const msg = JSON.parse(message);
 
       if (msg.event === 'start') {
         callSid = msg.start.callSid;
         streamSid = msg.start.streamSid;
-        const langs = callLanguages.get(callSid) || { source: 'es', target: 'en' };
-
-        console.log(`Stream started - CallSid: ${callSid}, source: ${langs.source}, target: ${langs.target}`);
-
-        openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-realtime', {
-          headers: {
-            'Authorization': `Bearer ${OPENAI_API_KEY}`
-          }
-        });
-
-        openAiWs.on('open', () => {
-          console.log('OpenAI WebSocket opened');
-          
-          const sessionConfig = {
-            type: 'session.update',
-            session: {
-              type: 'realtime',
-              instructions: `You are a real-time translator. Translate spoken ${languageMap[langs.source]} to 
-${languageMap[langs.target]}. Output ONLY the translation, speak naturally in ${languageMap[langs.target]}.`
-            }
-          };
-
-          console.log('Sending session config:', JSON.stringify(sessionConfig));
-          openAiWs.send(JSON.stringify(sessionConfig));
-        });
-
-        openAiWs.on('message', (data) => {
-          try {
-            const response = JSON.parse(data);
-            console.log('OpenAI event:', response.type);
-
-            if (response.type === 'error') {
-              console.error('OpenAI ERROR:', JSON.stringify(response, null, 2));
-            }
-
-            if (response.type === 'response.output_audio.delta' && response.delta) {
-              ws.send(JSON.stringify({
-                event: 'media',
-                streamSid: streamSid,
-                media: { payload: response.delta }
-              }));
-            }
-          } catch (error) {
-            console.error('Error processing OpenAI message:', error.message);
-          }
-        });
-
-        openAiWs.on('error', (error) => {
-          console.error('OpenAI WebSocket error:', error);
-        });
-        
-        openAiWs.on('close', (code, reason) => {
-          console.log(`OpenAI WebSocket closed - Code: ${code}, Reason: ${reason}`);
-        });
+        langs = callLanguages.get(callSid) || { source: 'es', target: 'en' };
+        console.log(`Stream started: ${langs.source} → ${langs.target}`);
       }
 
-      if (msg.event === 'media' && openAiWs && openAiWs.readyState === WebSocket.OPEN) {
-        openAiWs.send(JSON.stringify({
-          type: 'input_audio_buffer.append',
-          audio: msg.media.payload
-        }));
+      if (msg.event === 'media') {
+        audioBuffer.push(msg.media.payload);
+
+        // Process every 3 seconds of audio
+        if (audioBuffer.length >= 150 && !isProcessing) {
+          isProcessing = true;
+          const audioToProcess = audioBuffer.slice();
+          audioBuffer = [];
+
+          // Process in background
+          processAudio(audioToProcess, langs, streamSid, ws).finally(() => {
+            isProcessing = false;
+          });
+        }
       }
 
       if (msg.event === 'stop') {
         console.log('Stream stopped');
-        if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
-          openAiWs.close();
-        }
-        if (callSid) {
-          callLanguages.delete(callSid);
-        }
       }
     } catch (error) {
-      console.error('Error handling message:', error.message);
+      console.error('WebSocket error:', error);
     }
   });
 
   ws.on('close', () => {
-    console.log('WebSocket connection closed');
-    if (openAiWs && openAiWs.readyState === WebSocket.OPEN) {
-      openAiWs.close();
+    console.log('WebSocket closed');
+    if (callSid) {
+      callLanguages.delete(callSid);
     }
   });
 });
+
+async function processAudio(audioChunks, langs, streamSid, ws) {
+  try {
+    console.log(`Processing ${audioChunks.length} audio chunks...`);
+
+    // Convert audio chunks to WAV
+    const audioData = Buffer.from(audioChunks.join(''), 'base64');
+    
+    // Save temporarily
+    const fs = require('fs');
+    const tmpFile = `/tmp/audio_${Date.now()}.wav`;
+    fs.writeFileSync(tmpFile, audioData);
+
+    // Transcribe with Whisper
+    const transcription = await openai.audio.transcriptions.create({
+      file: fs.createReadStream(tmpFile),
+      model: 'whisper-1',
+      language: langs.source
+    });
+
+    fs.unlinkSync(tmpFile); // Clean up
+
+    if (!transcription.text || transcription.text.trim().length === 0) {
+      console.log('No speech detected');
+      return;
+    }
+
+    console.log(`Transcribed: "${transcription.text}"`);
+
+    // Translate with GPT-4
+    const translation = await openai.chat.completions.create({
+      model: 'gpt-4',
+      messages: [{
+        role: 'system',
+        content: `You are a professional translator. Translate from ${languageMap[langs.source].name} to 
+${languageMap[langs.target].name}. Output ONLY the translation, nothing else. Be natural and conversational.`
+      }, {
+        role: 'user',
+        content: transcription.text
+      }],
+      temperature: 0.3
+    });
+
+    const translatedText = translation.choices[0].message.content.trim();
+    console.log(`Translated: "${translatedText}"`);
+
+    // Synthesize with TTS
+    const speech = await openai.audio.speech.create({
+      model: 'tts-1',
+      voice: 'alloy',
+      input: translatedText,
+      response_format: 'mulaw',
+      speed: 1.0
+    });
+
+    const audioBuffer = Buffer.from(await speech.arrayBuffer());
+    const base64Audio = audioBuffer.toString('base64');
+
+    // Send audio back to caller
+    ws.send(JSON.stringify({
+      event: 'media',
+      streamSid: streamSid,
+      media: {
+        payload: base64Audio
+      }
+    }));
+
+    console.log('Translation sent to caller');
+  } catch (error) {
+    console.error('Process audio error:', error);
+  }
+}
 
 const server = app.listen(PORT, () => {
   console.log(`Server on port ${PORT}`);
 });
 
 server.on('upgrade', (request, socket, head) => {
-  console.log('WebSocket upgrade requested from:', request.url);
+  console.log('WebSocket upgrade');
   wss.handleUpgrade(request, socket, head, (ws) => {
-    console.log('WebSocket upgrade successful');
     wss.emit('connection', ws, request);
   });
 });
