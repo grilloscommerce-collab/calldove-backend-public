@@ -22,7 +22,7 @@ async function connectDB() {
   if (db) return db;
   const client = new MongoClient(MONGODB_URI);
   await client.connect();
-  db = client.db('calldove');
+  db = client.db('talk2');
   console.log('MongoDB connected');
   return db;
 }
