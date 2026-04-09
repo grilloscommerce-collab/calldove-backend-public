@@ -10,11 +10,12 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, 
+process.env.TWILIO_AUTH_TOKEN);
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const PORT = process.env.PORT || 3000;
 const MONGODB_URI = process.env.MONGODB_URI;
-const BASE_URL = 'https://patient-respect-production-2602.up.railway.app';
+const BASE_URL = 'https://web-production-38c0e.up.railway.app';
 
 let db = null;
 
@@ -77,7 +78,7 @@ app.post('/api/auth/register', async (req, res) => {
       password,
       phone,
       verified: false,
-      preferredLanguage: 'en', // Default language
+      preferredLanguage: 'en',
       createdAt: new Date()
     });
     
@@ -190,20 +191,64 @@ app.post('/api/generate-token', async (req, res) => {
 // VOICE CALL ENDPOINTS
 // ==========================================
 
+// Initiate outbound call
+app.post('/api/call/initiate', async (req, res) => {
+  try {
+    const { userPhone, targetPhone, sourceLanguage, targetLanguage } = 
+req.body;
+
+    console.log(`📞 Initiating call: ${userPhone} → ${targetPhone} 
+(${sourceLanguage} → ${targetLanguage})`);
+
+    // Make call to user first
+    const call = await twilioClient.calls.create({
+      url: 
+`${BASE_URL}/voice?source=${sourceLanguage}&target=${targetLanguage}`,
+      to: userPhone,
+      from: process.env.TWILIO_PHONE_NUMBER,
+      statusCallback: `${BASE_URL}/call-status`,
+      statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+      record: false
+    });
+
+    res.json({ 
+      success: true, 
+      callSid: call.sid,
+      message: 'Call initiated. Answer your phone to connect.'
+    });
+
+  } catch (error) {
+    console.error('Call initiation error:', error);
+    res.json({ 
+      error: error.message || 'Failed to initiate call' 
+    });
+  }
+});
+
+// Call status callback
+app.post('/call-status', (req, res) => {
+  const { CallSid, CallStatus } = req.body;
+  console.log(`📱 Call ${CallSid} status: ${CallStatus}`);
+  res.sendStatus(200);
+});
+
 app.post('/voice', async (req, res) => {
   try {
     const source = req.query.source || 'es';
     const target = req.query.target || 'en';
     const callSid = req.body.CallSid;
 
-    console.log(`Voice webhook - CallSid: ${callSid}, ${source} → ${target}`);
+    console.log(`Voice webhook - CallSid: ${callSid}, ${source} → 
+${target}`);
     callLanguages.set(callSid, { source, target });
 
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say>Translation ready. After the beep, speak in ${languageMap[source].name}.</Say>
+  <Say>Translation ready. After the beep, speak in 
+${languageMap[source].name}.</Say>
   <Record maxLength="10" playBeep="true" transcribe="false" 
-action="${BASE_URL}/process-recording?source=${source}&amp;target=${target}&amp;callSid=${callSid}" />
+action="${BASE_URL}/process-recording?source=${source}&amp;target=${target}&amp;callSid=${callSid}" 
+/>
 </Response>`;
 
     res.type('text/xml');
@@ -228,7 +273,8 @@ app.post('/process-recording', async (req, res) => {
 <Response>
   <Say>No recording received. Please try again.</Say>
   <Record maxLength="10" playBeep="true" transcribe="false" 
-action="${BASE_URL}/process-recording?source=${source}&amp;target=${target}&amp;callSid=${callSid}" />
+action="${BASE_URL}/process-recording?source=${source}&amp;target=${target}&amp;callSid=${callSid}" 
+/>
 </Response>`;
       res.type('text/xml');
       res.send(twiml);
@@ -277,7 +323,8 @@ Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
 <Response>
   <Say>No speech detected. Please speak clearly after the beep.</Say>
   <Record maxLength="10" playBeep="true" transcribe="false" 
-action="${BASE_URL}/process-recording?source=${source}&amp;target=${target}&amp;callSid=${callSid}" />
+action="${BASE_URL}/process-recording?source=${source}&amp;target=${target}&amp;callSid=${callSid}" 
+/>
 </Response>`;
       res.type('text/xml');
       res.send(twiml);
@@ -290,8 +337,8 @@ action="${BASE_URL}/process-recording?source=${source}&amp;target=${target}&amp;
       model: 'gpt-4',
       messages: [{
         role: 'system',
-        content: `Translate from ${languageMap[source].name} to ${languageMap[target].name}. Output ONLY the 
-translation, nothing else.`
+        content: `Translate from ${languageMap[source].name} to 
+${languageMap[target].name}. Output ONLY the translation, nothing else.`
       }, {
         role: 'user',
         content: transcription.text
@@ -304,10 +351,12 @@ translation, nothing else.`
 
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say>${translatedText.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</Say>
+  <Say>${translatedText.replace(/&/g, '&amp;').replace(/</g, 
+'&lt;').replace(/>/g, '&gt;')}</Say>
   <Say>Speak again after the beep.</Say>
   <Record maxLength="10" playBeep="true" transcribe="false" 
-action="${BASE_URL}/process-recording?source=${source}&amp;target=${target}&amp;callSid=${callSid}" />
+action="${BASE_URL}/process-recording?source=${source}&amp;target=${target}&amp;callSid=${callSid}" 
+/>
 </Response>`;
 
     console.log('✅ Translation sent successfully!');
@@ -329,7 +378,6 @@ action="${BASE_URL}/process-recording?source=${source}&amp;target=${target}&amp;
 // CHAT ENDPOINTS
 // ==========================================
 
-// Get all conversations for a user
 app.get('/api/chats/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
@@ -349,7 +397,6 @@ app.get('/api/chats/:userId', async (req, res) => {
   }
 });
 
-// Get messages in a conversation
 app.get('/api/messages/:conversationId', async (req, res) => {
   try {
     const { conversationId } = req.params;
@@ -368,7 +415,6 @@ app.get('/api/messages/:conversationId', async (req, res) => {
   }
 });
 
-// Send message with translation
 app.post('/api/messages/send', async (req, res) => {
   try {
     const { senderId, recipientId, text, senderLanguage } = req.body;
@@ -376,7 +422,6 @@ app.post('/api/messages/send', async (req, res) => {
     
     console.log(`New message from ${senderId} to ${recipientId}`);
     
-    // Get or create conversation
     let conversation = await db.collection('conversations').findOne({
       participants: { $all: [senderId, recipientId] }
     });
@@ -391,23 +436,23 @@ app.post('/api/messages/send', async (req, res) => {
       conversation = { _id: result.insertedId };
     }
     
-    // Get recipient's language preference
     const recipient = await db.collection('users').findOne({ 
       _id: new ObjectId(recipientId) 
     });
     const recipientLanguage = recipient?.preferredLanguage || 'en';
     
-    console.log(`Translating message from ${senderLanguage} to ${recipientLanguage}`);
+    console.log(`Translating message from ${senderLanguage} to 
+${recipientLanguage}`);
     
-    // Translate if languages are different
     let translatedText = text;
     if (senderLanguage !== recipientLanguage) {
       const translation = await openai.chat.completions.create({
         model: 'gpt-4',
         messages: [{
           role: 'system',
-          content: `Translate from ${languageMap[senderLanguage].name} to ${languageMap[recipientLanguage].name}. 
-Output ONLY the translation, maintain the tone and style.`
+          content: `Translate from ${languageMap[senderLanguage].name} to 
+${languageMap[recipientLanguage].name}. Output ONLY the translation, maintain 
+the tone and style.`
         }, {
           role: 'user',
           content: text
@@ -418,7 +463,6 @@ Output ONLY the translation, maintain the tone and style.`
       console.log(`Original: "${text}" → Translated: "${translatedText}"`);
     }
     
-    // Save message with both versions
     const message = {
       conversationId: conversation._id.toString(),
       senderId,
@@ -433,7 +477,6 @@ Output ONLY the translation, maintain the tone and style.`
     
     const messageResult = await db.collection('messages').insertOne(message);
     
-    // Update conversation
     await db.collection('conversations').updateOne(
       { _id: conversation._id },
       { 
@@ -456,7 +499,6 @@ Output ONLY the translation, maintain the tone and style.`
   }
 });
 
-// Mark messages as read
 app.post('/api/messages/read', async (req, res) => {
   try {
     const { conversationId, userId } = req.body;
