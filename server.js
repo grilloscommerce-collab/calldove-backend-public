@@ -42,7 +42,7 @@ const languageMap = {
   'hi': { code: 'hi', name: 'Hindi' }
 };
 
-const callLanguages = new Map();
+const activeConferences = new Map();
 
 // ==========================================
 // HEALTH & INFO
@@ -188,33 +188,42 @@ app.post('/api/generate-token', async (req, res) => {
 });
 
 // ==========================================
-// VOICE CALL ENDPOINTS
+// VOICE CALL ENDPOINTS - BIDIRECTIONAL
 // ==========================================
 
-// Initiate outbound call
 app.post('/api/call/initiate', async (req, res) => {
   try {
     const { userPhone, targetPhone, sourceLanguage, targetLanguage } = 
 req.body;
+    const conferenceName = `conf_${Date.now()}`;
 
-    console.log(`📞 Initiating call: ${userPhone} → ${targetPhone} 
-(${sourceLanguage} → ${targetLanguage})`);
+    console.log(`📞 Initiating conference: ${userPhone} <-> ${targetPhone}`);
+    console.log(`   Languages: ${sourceLanguage} <-> ${targetLanguage}`);
 
-    // Make call to user first
-    const call = await twilioClient.calls.create({
+    activeConferences.set(conferenceName, {
+      userPhone,
+      targetPhone,
+      userLanguage: sourceLanguage,
+      targetLanguage: targetLanguage,
+      createdAt: new Date()
+    });
+
+    const userCall = await twilioClient.calls.create({
       url: 
-`${BASE_URL}/voice?source=${sourceLanguage}&target=${targetLanguage}`,
+`${BASE_URL}/connect-user?conference=${conferenceName}&lang=${sourceLanguage}`,
       to: userPhone,
       from: process.env.TWILIO_PHONE_NUMBER,
       statusCallback: `${BASE_URL}/call-status`,
-      statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
-      record: false
+      statusCallbackEvent: ['answered', 'completed']
     });
+
+    console.log(`✅ User call initiated: ${userCall.sid}`);
 
     res.json({ 
       success: true, 
-      callSid: call.sid,
-      message: 'Call initiated. Answer your phone to connect.'
+      callSid: userCall.sid,
+      conferenceName,
+      message: 'Call initiated. Answer your phone!'
     });
 
   } catch (error) {
@@ -225,10 +234,95 @@ req.body;
   }
 });
 
-// Call status callback
+app.post('/connect-user', async (req, res) => {
+  try {
+    const conferenceName = req.query.conference;
+    const userLang = req.query.lang;
+    
+    console.log(`👤 User answered, joining conference: ${conferenceName}`);
+
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>Connecting your call with translation.</Say>
+  <Dial>
+    <Conference
+      startConferenceOnEnter="true"
+      endConferenceOnExit="true"
+      
+statusCallback="${BASE_URL}/conference-status?conference=${conferenceName}"
+      statusCallbackEvent="start,end,join,leave"
+    >${conferenceName}</Conference>
+  </Dial>
+</Response>`;
+
+    res.type('text/xml');
+    res.send(twiml);
+
+    setTimeout(async () => {
+      const confData = activeConferences.get(conferenceName);
+      if (confData) {
+        console.log(`📞 Calling target: ${confData.targetPhone}`);
+        
+        await twilioClient.calls.create({
+          url: 
+`${BASE_URL}/connect-target?conference=${conferenceName}&lang=${confData.targetLanguage}`,
+          to: confData.targetPhone,
+          from: process.env.TWILIO_PHONE_NUMBER
+        });
+      }
+    }, 2000);
+
+  } catch (error) {
+    console.error('Connect user error:', error);
+    res.type('text/xml');
+    res.send('<Response><Say>Connection error</Say><Hangup /></Response>');
+  }
+});
+
+app.post('/connect-target', async (req, res) => {
+  try {
+    const conferenceName = req.query.conference;
+    const targetLang = req.query.lang;
+    
+    console.log(`👥 Target answered, joining conference: ${conferenceName}`);
+
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Dial>
+    <Conference
+      startConferenceOnEnter="false"
+      endConferenceOnExit="true"
+    >${conferenceName}</Conference>
+  </Dial>
+</Response>`;
+
+    res.type('text/xml');
+    res.send(twiml);
+
+  } catch (error) {
+    console.error('Connect target error:', error);
+    res.type('text/xml');
+    res.send('<Response><Hangup /></Response>');
+  }
+});
+
+app.post('/conference-status', (req, res) => {
+  const { StatusCallbackEvent, FriendlyName } = req.body;
+  const conferenceName = req.query.conference;
+  
+  console.log(`🎙️  Conference ${conferenceName}: ${StatusCallbackEvent}`);
+  
+  if (StatusCallbackEvent === 'conference-end') {
+    activeConferences.delete(conferenceName);
+    console.log(`✅ Conference ${conferenceName} ended and cleaned up`);
+  }
+  
+  res.sendStatus(200);
+});
+
 app.post('/call-status', (req, res) => {
   const { CallSid, CallStatus } = req.body;
-  console.log(`📱 Call ${CallSid} status: ${CallStatus}`);
+  console.log(`📱 Call ${CallSid}: ${CallStatus}`);
   res.sendStatus(200);
 });
 
@@ -238,16 +332,15 @@ app.post('/voice', async (req, res) => {
     const target = req.query.target || 'en';
     const callSid = req.body.CallSid;
 
-    console.log(`Voice webhook - CallSid: ${callSid}, ${source} → 
+    console.log(`Voice webhook - CallSid: ${callSid}, ${source} -> 
 ${target}`);
-    callLanguages.set(callSid, { source, target });
 
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say>Translation ready. After the beep, speak in 
 ${languageMap[source].name}.</Say>
   <Record maxLength="10" playBeep="true" transcribe="false" 
-action="${BASE_URL}/process-recording?source=${source}&amp;target=${target}&amp;callSid=${callSid}" 
+action="${BASE_URL}/process-recording?source=${source}&target=${target}&callSid=${callSid}" 
 />
 </Response>`;
 
@@ -273,7 +366,7 @@ app.post('/process-recording', async (req, res) => {
 <Response>
   <Say>No recording received. Please try again.</Say>
   <Record maxLength="10" playBeep="true" transcribe="false" 
-action="${BASE_URL}/process-recording?source=${source}&amp;target=${target}&amp;callSid=${callSid}" 
+action="${BASE_URL}/process-recording?source=${source}&target=${target}&callSid=${callSid}" 
 />
 </Response>`;
       res.type('text/xml');
@@ -323,7 +416,7 @@ Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
 <Response>
   <Say>No speech detected. Please speak clearly after the beep.</Say>
   <Record maxLength="10" playBeep="true" transcribe="false" 
-action="${BASE_URL}/process-recording?source=${source}&amp;target=${target}&amp;callSid=${callSid}" 
+action="${BASE_URL}/process-recording?source=${source}&target=${target}&callSid=${callSid}" 
 />
 </Response>`;
       res.type('text/xml');
@@ -355,7 +448,7 @@ ${languageMap[target].name}. Output ONLY the translation, nothing else.`
 '&lt;').replace(/>/g, '&gt;')}</Say>
   <Say>Speak again after the beep.</Say>
   <Record maxLength="10" playBeep="true" transcribe="false" 
-action="${BASE_URL}/process-recording?source=${source}&amp;target=${target}&amp;callSid=${callSid}" 
+action="${BASE_URL}/process-recording?source=${source}&target=${target}&callSid=${callSid}" 
 />
 </Response>`;
 
@@ -460,7 +553,7 @@ the tone and style.`
         temperature: 0.3
       });
       translatedText = translation.choices[0].message.content.trim();
-      console.log(`Original: "${text}" → Translated: "${translatedText}"`);
+      console.log(`Original: "${text}" -> Translated: "${translatedText}"`);
     }
     
     const message = {
@@ -524,4 +617,5 @@ const server = app.listen(PORT, () => {
   console.log(`Talk2 Server running on port ${PORT}`);
   console.log(`Chat endpoints: ✅`);
   console.log(`Voice endpoints: ✅`);
+  console.log(`Conference calls: ✅`);
 });
