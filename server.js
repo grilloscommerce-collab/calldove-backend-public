@@ -608,7 +608,51 @@ app.post('/api/messages/read', async (req, res) => {
     res.json({ error: 'Failed to mark as read' });
   }
 });
-
+app.post('/api/messages/send-simple', async (req, res) => {
+  try {
+    const { senderPhone, recipientPhone, text, senderLanguage } = req.body;
+    
+    console.log(`💬 Message: ${senderPhone} -> ${recipientPhone}`);
+    
+    const targetLanguage = 'en';
+    
+    let translatedText = text;
+    if (senderLanguage !== targetLanguage) {
+      const translation = await openai.chat.completions.create({
+        model: 'gpt-4',
+        messages: [{
+          role: 'system',
+          content: `Translate from ${languageMap[senderLanguage].name} to 
+${languageMap[targetLanguage].name}. Output ONLY the translation.`
+        }, {
+          role: 'user',
+          content: text
+        }],
+        temperature: 0.3
+      });
+      translatedText = translation.choices[0].message.content.trim();
+      console.log(`Translated: "${text}" -> "${translatedText}"`);
+    }
+    
+    const message = {
+      _id: Date.now().toString(),
+      senderPhone,
+      recipientPhone,
+      originalText: text,
+      originalLanguage: senderLanguage,
+      translatedText,
+      translatedLanguage: targetLanguage,
+      createdAt: new Date().toISOString()
+    };
+    
+    console.log('✅ Message translated!');
+    
+    res.json({ success: true, message });
+  } catch (error) {
+    console.error('Send message error:', error);
+    res.json({ error: 'Failed to send message' });
+  }
+});
 // ==========================================
 // SERVER START
 // ==========================================
