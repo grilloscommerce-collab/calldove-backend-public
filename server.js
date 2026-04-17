@@ -266,8 +266,7 @@ statusCallback="${BASE_URL}/conference-status?conference=${conferenceName}"
   } catch (error) {
     console.error('Connect user error:', error);
     res.type('text/xml');
-    res.send('<Response><Say>Connection error</Say><Hangup 
-/></Response>');
+res.send('<Response><Say>Connection error</Say><Hangup /></Response>');
   }
 });
 
