@@ -405,7 +405,6 @@ Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
     const transcription = await openai.audio.transcriptions.create({
       file: fs.createReadStream(tmpFile),
       model: 'whisper-1',
-      language: source
     });
 
     fs.unlinkSync(tmpFile);
@@ -618,4 +617,5 @@ const server = app.listen(PORT, () => {
   console.log(`Chat endpoints: ✅`);
   console.log(`Voice endpoints: ✅`);
   console.log(`Conference calls: ✅`);
+  console.log(`Auto language detection: ✅`);
 });
