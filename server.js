@@ -202,7 +202,6 @@ statusCallbackEvent="start,end,join,leave">${conferenceName}</Conference></Dial>
     console.error('Connect user error:', error);
     res.type('text/xml');
     res.send('<Response><Say>Connection error</Say><Hangup /></Response>');
-/></Response>');
   }
 });
 
@@ -254,14 +253,12 @@ encoding="UTF-8"?><Response><Say>Translation ready. After the beep, speak
 in ${languageMap[source].name}.</Say><Record maxLength="10" 
 playBeep="true" transcribe="false" 
 action="${BASE_URL}/process-recording?source=${source}&target=${target}&callSid=${callSid}" 
-/></Response>`;
     res.type('text/xml');
     res.send(twimlResponse);
   } catch (error) {
     console.error('Voice webhook error:', error);
     res.type('text/xml');
     res.send('<Response><Say>Application error</Say><Hangup /></Response>');
-/></Response>');
   }
 });
 
@@ -276,7 +273,6 @@ app.post('/process-recording', async (req, res) => {
 encoding="UTF-8"?><Response><Say>No recording received. Please try 
 again.</Say><Record maxLength="10" playBeep="true" transcribe="false" 
 action="${BASE_URL}/process-recording?source=${source}&target=${target}&callSid=${callSid}" 
-/></Response>`;
       res.type('text/xml');
       res.send(twiml);
       return;
@@ -306,7 +302,6 @@ encoding="UTF-8"?><Response><Say>No speech detected. Please speak clearly
 after the beep.</Say><Record maxLength="10" playBeep="true" 
 transcribe="false" 
 action="${BASE_URL}/process-recording?source=${source}&target=${target}&callSid=${callSid}" 
-/></Response>`;
       res.type('text/xml');
       res.send(twiml);
       return;
@@ -330,7 +325,6 @@ encoding="UTF-8"?><Response><Say>${translatedText.replace(/&/g,
 again after the beep.</Say><Record maxLength="10" playBeep="true" 
 transcribe="false" 
 action="${BASE_URL}/process-recording?source=${source}&target=${target}&callSid=${callSid}" 
-/></Response>`;
     console.log('✅ Translation sent successfully!');
     res.type('text/xml');
     res.send(twiml);
