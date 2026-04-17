@@ -201,7 +201,7 @@ statusCallbackEvent="start,end,join,leave">${conferenceName}</Conference></Dial>
   } catch (error) {
     console.error('Connect user error:', error);
     res.type('text/xml');
-    res.send('<Response><Say>Connection error</Say><Hangup 
+    res.send('<Response><Say>Connection error</Say><Hangup /></Response>');
 /></Response>');
   }
 });
@@ -260,7 +260,7 @@ action="${BASE_URL}/process-recording?source=${source}&target=${target}&callSid=
   } catch (error) {
     console.error('Voice webhook error:', error);
     res.type('text/xml');
-    res.send('<Response><Say>Application error</Say><Hangup 
+    res.send('<Response><Say>Application error</Say><Hangup /></Response>');
 /></Response>');
   }
 });
