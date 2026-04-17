@@ -65,7 +65,7 @@ app.get('/health', (req, res) => {
 
 app.post('/api/auth/register', async (req, res) => {
   try {
-    const { email, password, phone } = req.body;
+    const { email, password, phone, preferredLanguage } = req.body;
     const db = await connectDB();
     
     const existingUser = await db.collection('users').findOne({ email });
@@ -78,7 +78,7 @@ app.post('/api/auth/register', async (req, res) => {
       password,
       phone,
       verified: false,
-      preferredLanguage: 'en',
+      preferredLanguage: preferredLanguage || 'en',
       createdAt: new Date()
     });
     
@@ -94,7 +94,8 @@ app.post('/api/auth/login', async (req, res) => {
     const { email, password } = req.body;
     const db = await connectDB();
     
-    const user = await db.collection('users').findOne({ email, password });
+    const user = await db.collection('users').findOne({ email, password 
+});
     if (!user) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
@@ -197,14 +198,15 @@ app.post('/api/call/initiate', async (req, res) => {
 req.body;
     const conferenceName = `conf_${Date.now()}`;
 
-    console.log(`📞 Initiating conference: ${userPhone} <-> ${targetPhone}`);
-    console.log(`   Languages: ${sourceLanguage} <-> ${targetLanguage}`);
+    console.log(`📞 Initiating conference: ${userPhone} <-> 
+${targetPhone}`);
+    console.log(`   Languages: ${sourceLanguage} <-> auto-detect`);
 
     activeConferences.set(conferenceName, {
       userPhone,
       targetPhone,
       userLanguage: sourceLanguage,
-      targetLanguage: targetLanguage,
+      targetLanguage: 'auto',
       createdAt: new Date()
     });
 
@@ -239,7 +241,8 @@ app.post('/connect-user', async (req, res) => {
     const conferenceName = req.query.conference;
     const userLang = req.query.lang;
     
-    console.log(`👤 User answered, joining conference: ${conferenceName}`);
+    console.log(`👤 User answered, joining conference: 
+${conferenceName}`);
 
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -275,7 +278,8 @@ statusCallback="${BASE_URL}/conference-status?conference=${conferenceName}"
   } catch (error) {
     console.error('Connect user error:', error);
     res.type('text/xml');
-    res.send('<Response><Say>Connection error</Say><Hangup /></Response>');
+    res.send('<Response><Say>Connection error</Say><Hangup 
+/></Response>');
   }
 });
 
@@ -284,7 +288,8 @@ app.post('/connect-target', async (req, res) => {
     const conferenceName = req.query.conference;
     const targetLang = req.query.lang;
     
-    console.log(`👥 Target answered, joining conference: ${conferenceName}`);
+    console.log(`👥 Target answered, joining conference: 
+${conferenceName}`);
 
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -349,7 +354,8 @@ action="${BASE_URL}/process-recording?source=${source}&target=${target}&callSid=
   } catch (error) {
     console.error('Voice webhook error:', error);
     res.type('text/xml');
-    res.send('<Response><Say>Application error</Say><Hangup /></Response>');
+    res.send('<Response><Say>Application error</Say><Hangup 
+/></Response>');
   }
 });
 
@@ -400,12 +406,12 @@ Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
       });
     });
 
-    console.log('Audio downloaded, transcribing...');
+    console.log('Audio downloaded, transcribing with auto-detect...');
 
     const transcription = await openai.audio.transcriptions.create({
       file: fs.createReadStream(tmpFile),
-      model: 'whisper-1',
-      language: source
+      model: 'whisper-1'
+      // No language specified = auto-detect
     });
 
     fs.unlinkSync(tmpFile);
@@ -424,14 +430,17 @@ action="${BASE_URL}/process-recording?source=${source}&target=${target}&callSid=
       return;
     }
 
-    console.log(`Transcribed (${source}): "${transcription.text}"`);
+    const detectedLang = transcription.language || source;
+    console.log(`Transcribed (detected: ${detectedLang}): 
+"${transcription.text}"`);
 
     const translation = await openai.chat.completions.create({
       model: 'gpt-4',
       messages: [{
         role: 'system',
-        content: `Translate from ${languageMap[source].name} to 
-${languageMap[target].name}. Output ONLY the translation, nothing else.`
+        content: `Translate from ${languageMap[detectedLang]?.name || 'the 
+source language'} to ${languageMap[target].name}. Output ONLY the 
+translation, nothing else.`
       }, {
         role: 'user',
         content: transcription.text
@@ -544,8 +553,8 @@ ${recipientLanguage}`);
         messages: [{
           role: 'system',
           content: `Translate from ${languageMap[senderLanguage].name} to 
-${languageMap[recipientLanguage].name}. Output ONLY the translation, maintain 
-the tone and style.`
+${languageMap[recipientLanguage].name}. Output ONLY the translation, 
+maintain the tone and style.`
         }, {
           role: 'user',
           content: text
@@ -553,7 +562,8 @@ the tone and style.`
         temperature: 0.3
       });
       translatedText = translation.choices[0].message.content.trim();
-      console.log(`Original: "${text}" -> Translated: "${translatedText}"`);
+      console.log(`Original: "${text}" -> Translated: 
+"${translatedText}"`);
     }
     
     const message = {
@@ -568,7 +578,8 @@ the tone and style.`
       read: false
     };
     
-    const messageResult = await db.collection('messages').insertOne(message);
+    const messageResult = await 
+db.collection('messages').insertOne(message);
     
     await db.collection('conversations').updateOne(
       { _id: conversation._id },
@@ -608,9 +619,11 @@ app.post('/api/messages/read', async (req, res) => {
     res.json({ error: 'Failed to mark as read' });
   }
 });
+
 app.post('/api/messages/send-simple', async (req, res) => {
   try {
-    const { senderPhone, recipientPhone, text, senderLanguage } = req.body;
+    const { senderPhone, recipientPhone, text, senderLanguage } = 
+req.body;
     
     console.log(`💬 Message: ${senderPhone} -> ${recipientPhone}`);
     
@@ -653,6 +666,7 @@ ${languageMap[targetLanguage].name}. Output ONLY the translation.`
     res.json({ error: 'Failed to send message' });
   }
 });
+
 // ==========================================
 // SERVER START
 // ==========================================
@@ -662,4 +676,5 @@ const server = app.listen(PORT, () => {
   console.log(`Chat endpoints: ✅`);
   console.log(`Voice endpoints: ✅`);
   console.log(`Conference calls: ✅`);
+  console.log(`Auto language detection: ✅`);
 });
