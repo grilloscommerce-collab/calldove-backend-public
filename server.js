@@ -44,10 +44,6 @@ const languageMap = {
 
 const activeConferences = new Map();
 
-// ==========================================
-// HEALTH & INFO
-// ==========================================
-
 app.get('/', (req, res) => {
   res.send('Talk2 Translation Server Running');
 });
@@ -58,10 +54,6 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString() 
   });
 });
-
-// ==========================================
-// AUTH ENDPOINTS
-// ==========================================
 
 app.post('/api/auth/register', async (req, res) => {
   try {
@@ -188,10 +180,6 @@ app.post('/api/generate-token', async (req, res) => {
   }
 });
 
-// ==========================================
-// VOICE CALL ENDPOINTS - BIDIRECTIONAL
-// ==========================================
-
 app.post('/api/call/initiate', async (req, res) => {
   try {
     const { userPhone, targetPhone, sourceLanguage, targetLanguage } = 
@@ -278,7 +266,8 @@ statusCallback="${BASE_URL}/conference-status?conference=${conferenceName}"
   } catch (error) {
     console.error('Connect user error:', error);
     res.type('text/xml');
-    res.send('<Response><Say>Connection error</Say><Hangup /></Response>');
+    res.send('<Response><Say>Connection error</Say><Hangup 
+/></Response>');
   }
 });
 
@@ -410,7 +399,6 @@ Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
     const transcription = await openai.audio.transcriptions.create({
       file: fs.createReadStream(tmpFile),
       model: 'whisper-1'
-      // No language specified = auto-detect
     });
 
     fs.unlinkSync(tmpFile);
@@ -465,19 +453,11 @@ action="${BASE_URL}/process-recording?source=${source}&target=${target}&callSid=
     res.send(twiml);
   } catch (error) {
     console.error('Process recording error:', error);
-    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Say>Translation error occurred. Hanging up.</Say>
-  <Hangup />
-</Response>`;
     res.type('text/xml');
-    res.send(twiml);
+    res.send('<Response><Say>Translation error occurred. Hanging 
+up.</Say><Hangup /></Response>');
   }
 });
-
-// ==========================================
-// CHAT ENDPOINTS
-// ==========================================
 
 app.get('/api/chats/:userId', async (req, res) => {
   try {
@@ -665,10 +645,6 @@ ${languageMap[targetLanguage].name}. Output ONLY the translation.`
     res.json({ error: 'Failed to send message' });
   }
 });
-
-// ==========================================
-// SERVER START
-// ==========================================
 
 const server = app.listen(PORT, () => {
   console.log(`Talk2 Server running on port ${PORT}`);
