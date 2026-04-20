@@ -122,12 +122,23 @@ app.post('/api/generate-token', async (req, res) => {
 app.post('/api/call/initiate', async (req, res) => {
   try {
     const { userPhone, targetPhone, sourceLanguage } = req.body;
-    console.log(`Calling ${userPhone} -> ${targetPhone} (${sourceLanguage})`);
-    const call = await twilioClient.calls.create({ url: `${BASE_URL}/voice-user?source=${sourceLanguage}&target=${targetPhone}`, to: userPhone, from: process.env.TWILIO_PHONE_NUMBER });
-    res.json({ success: true, callSid: call.sid });
+    
+    // Clean phone numbers (remove spaces, parentheses, dashes)
+    const cleanTargetPhone = targetPhone.replace(/[\s\(\)\-]/g, '');
+    
+    console.log(`📞 Call: ${userPhone} -> ${cleanTargetPhone} (${sourceLanguage})`);
+    
+    const call = await twilioClient.calls.create({
+      url: `${BASE_URL}/voice-user?source=${sourceLanguage}&target=${encodeURIComponent(cleanTargetPhone)}`,
+      to: userPhone,
+      from: process.env.TWILIO_PHONE_NUMBER
+    });
+    
+    console.log(`✅ Call initiated: ${call.sid}`);
+    res.json({ success: true, callSid: call.sid, message: 'Calling you now!' });
   } catch (error) {
     console.error('Call error:', error);
-    res.json({ error: error.message });
+    res.json({ error: error.message || 'Failed to initiate call' });
   }
 });
 
