@@ -188,16 +188,14 @@ app.post('/translation-loop', async (req, res) => {
     console.log(`🎙️ Translation loop: ${DialCallStatus}`);
     
     if (DialCallStatus === 'completed' || DialCallStatus === 'no-answer') {
-      const twiml = `<?xml version="1.0" encoding="UTF-8"?><Response><Say>Call 
-ended.</Say></Response>`;
+      const twiml = `<?xml version="1.0" encoding="UTF-8"?><Response><Say>Call ended.</Say></Response>`;
       res.type('text/xml');
       res.send(twiml);
       return;
     }
     
     const target = isUser ? 'en' : source;
-    const twiml = `<?xml version="1.0" encoding="UTF-8"?><Response><Say>After the beep, speak 
-your message.</Say><Record maxLength="10" playBeep="true" 
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?><Response><Record timeout="2" maxLength="30" playBeep="false" 
 action="${BASE_URL}/process-translation?source=${source}&target=${target}" /></Response>`;
     res.type('text/xml');
     res.send(twiml);
