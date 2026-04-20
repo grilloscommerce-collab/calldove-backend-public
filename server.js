@@ -250,8 +250,7 @@ detected.</Say><Hangup /></Response>`;
     const translation = await openai.chat.completions.create({
       model: 'gpt-4',
       messages: [
-        { role: 'system', content: `Translate from ${languageMap[detectedLang]?.name || 'detected 
-language'} to ${languageMap[target].name}. Output ONLY the translation.` },
+        { role: 'system', content: `Translate from ${languageMap[detectedLang]?.name || 'detected language'} to ${languageMap[target].name}. Output ONLY the translation.` },
         { role: 'user', content: transcription.text }
       ],
       temperature: 0.3
