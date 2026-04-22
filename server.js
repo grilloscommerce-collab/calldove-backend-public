@@ -218,6 +218,58 @@ app.post('/voice-stream-target', async (req, res) => {
   }
 });
 
+async function processAudioChunk(audioData, callId, role) {
+  const callData = activeCalls.get(callId);
+  if (!callData) return;
+  
+  try {
+    const tmpFile = '/tmp/audio_' + Date.now() + '.wav';
+    fs.writeFileSync(tmpFile, audioData);
+    
+    const transcription = await openai.audio.transcriptions.create({
+      file: fs.createReadStream(tmpFile),
+      model: 'whisper-1'
+    });
+    
+    fs.unlinkSync(tmpFile);
+    
+    if (!transcription.text || transcription.text.trim().length === 0) {
+      console.log('No speech detected in chunk');
+      return;
+    }
+    
+    console.log(role + ' said:', transcription.text);
+    
+    const sourceLanguage = role === 'user' ? callData.userLanguage : callData.targetLanguage;
+    const targetLanguage = role === 'user' ? callData.targetLanguage : callData.userLanguage;
+    
+    const translation = await openai.chat.completions.create({
+      model: 'gpt-4',
+      messages: [
+        { role: 'system', content: 'Translate to ' + languageMap[targetLanguage].name + '. Output ONLY translation.' },
+        { role: 'user', content: transcription.text }
+      ],
+      temperature: 0.3
+    });
+    
+    const translatedText = translation.choices[0].message.content.trim();
+    console.log('Translated to ' + targetLanguage + ':', translatedText);
+    
+    const targetCallSid = role === 'user' ? callData.targetCallSid : callData.userCallSid;
+    
+    if (targetCallSid) {
+      await twilioClient.calls(targetCallSid).update({
+        twiml: '<Response><Say>' + translatedText.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</Say><Pause length="1"/></Response>'
+      });
+      
+      console.log('Translation played to', role === 'user' ? 'target' : 'user');
+    }
+    
+  } catch (error) {
+    console.error('Process audio chunk error:', error.message);
+  }
+}
+
 app.get('/api/chats/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
@@ -331,7 +383,11 @@ wss.on('connection', (ws, req) => {
           const audioData = Buffer.from(audioBuffer.join(''), 'base64');
           audioBuffer.length = 0;
           
-          console.log('Processing audio chunk from', role);
+          console.log('Processing audio chunk from', role, '- size:', audioData.length);
+          
+          processAudioChunk(audioData, callId, role).catch(err => {
+            console.error('Audio processing error:', err);
+          });
         }
       }
       
