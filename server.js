@@ -5,6 +5,8 @@ const { MongoClient, ObjectId } = require('mongodb');
 const OpenAI = require('openai');
 const https = require('https');
 const fs = require('fs');
+const WebSocket = require('ws');
+const http = require('http');
 
 const app = express();
 app.use(express.json());
@@ -43,7 +45,7 @@ const languageMap = {
 };
 
 app.get('/', (req, res) => {
-  res.send('Talk2 Translation Server Running');
+  res.send('Talk2 Translation Server - Media Streams Ready');
 });
 
 app.get('/health', (req, res) => {
@@ -131,15 +133,16 @@ app.post('/api/call/initiate', async (req, res) => {
       targetPhone: cleanTargetPhone,
       userLanguage: sourceLanguage,
       targetLanguage: sourceLanguage === 'es' ? 'en' : 'es',
-      currentSpeaker: 'user',
-      userConnected: false,
-      targetConnected: false
+      userAudioBuffer: [],
+      targetAudioBuffer: [],
+      userCallSid: null,
+      targetCallSid: null
     });
     
-    console.log(`Initiating call ${callId}: ${userPhone} -> ${cleanTargetPhone}`);
+    console.log('Initiating streaming call:', callId);
     
     const call = await twilioClient.calls.create({
-      url: BASE_URL + '/connect-user?callId=' + callId,
+      url: BASE_URL + '/voice-stream-user?callId=' + callId,
       to: userPhone,
       from: process.env.TWILIO_PHONE_NUMBER
     });
@@ -151,7 +154,7 @@ app.post('/api/call/initiate', async (req, res) => {
   }
 });
 
-app.post('/connect-user', async (req, res) => {
+app.post('/voice-stream-user', async (req, res) => {
   try {
     const callId = req.query.callId;
     const callData = activeCalls.get(callId);
@@ -162,32 +165,34 @@ app.post('/connect-user', async (req, res) => {
       return;
     }
     
-    callData.userConnected = true;
-    console.log(`User connected to call ${callId}`);
+    callData.userCallSid = req.body.CallSid;
+    console.log('User connected to streaming call:', callId);
+    
+    const wsUrl = BASE_URL.replace('https://', 'wss://') + '/media-stream?callId=' + callId + '&role=user';
     
     res.type('text/xml');
-    res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Connecting your call with translation.</Say><Pause length="1"/><Say>After the beep, speak your message.</Say><Record maxLength="10" playBeep="true" action="' + BASE_URL + '/process-user?callId=' + callId + '" /></Response>');
+    res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Connecting with real time translation</Say><Start><Stream url="' + wsUrl + '" /></Start><Say>You can speak naturally. Translation happens in real time.</Say><Pause length="3600"/></Response>');
     
     setTimeout(async () => {
       try {
         await twilioClient.calls.create({
-          url: BASE_URL + '/connect-target?callId=' + callId,
+          url: BASE_URL + '/voice-stream-target?callId=' + callId,
           to: callData.targetPhone,
           from: process.env.TWILIO_PHONE_NUMBER
         });
       } catch (err) {
         console.error('Target call error:', err);
       }
-    }, 2000);
+    }, 3000);
     
   } catch (error) {
-    console.error('Connect user error:', error);
+    console.error('Voice stream user error:', error);
     res.type('text/xml');
     res.send('<Response><Hangup /></Response>');
   }
 });
 
-app.post('/connect-target', async (req, res) => {
+app.post('/voice-stream-target', async (req, res) => {
   try {
     const callId = req.query.callId;
     const callData = activeCalls.get(callId);
@@ -198,76 +203,16 @@ app.post('/connect-target', async (req, res) => {
       return;
     }
     
-    callData.targetConnected = true;
-    console.log(`Target connected to call ${callId}`);
+    callData.targetCallSid = req.body.CallSid;
+    console.log('Target connected to streaming call:', callId);
+    
+    const wsUrl = BASE_URL.replace('https://', 'wss://') + '/media-stream?callId=' + callId + '&role=target';
     
     res.type('text/xml');
-    res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Connected. Waiting for translation.</Say><Pause length="30"/></Response>');
+    res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Connected with real time translation</Say><Start><Stream url="' + wsUrl + '" /></Start><Say>You can speak naturally.</Say><Pause length="3600"/></Response>');
     
   } catch (error) {
-    console.error('Connect target error:', error);
-    res.type('text/xml');
-    res.send('<Response><Hangup /></Response>');
-  }
-});
-
-app.post('/process-user', async (req, res) => {
-  try {
-    const callId = req.query.callId;
-    const { RecordingSid } = req.body;
-    const callData = activeCalls.get(callId);
-    
-    if (!callData || !RecordingSid) {
-      res.type('text/xml');
-      res.send('<Response><Say>Error</Say><Hangup /></Response>');
-      return;
-    }
-    
-    console.log(`Processing user recording for call ${callId}`);
-    
-    const tmpFile = `/tmp/rec_${Date.now()}.wav`;
-    const downloadUrl = `https://api.twilio.com/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Recordings/${RecordingSid}.wav`;
-    const file = fs.createWriteStream(tmpFile);
-    
-    await new Promise((resolve, reject) => {
-      const auth = Buffer.from(process.env.TWILIO_ACCOUNT_SID + ':' + process.env.TWILIO_AUTH_TOKEN).toString('base64');
-      https.get(downloadUrl, { headers: { 'Authorization': 'Basic ' + auth } }, (response) => {
-        response.pipe(file);
-        file.on('finish', () => { file.close(); resolve(); });
-      }).on('error', reject);
-    });
-    
-    const transcription = await openai.audio.transcriptions.create({
-      file: fs.createReadStream(tmpFile),
-      model: 'whisper-1'
-    });
-    fs.unlinkSync(tmpFile);
-    
-    if (!transcription.text || transcription.text.trim().length === 0) {
-      res.type('text/xml');
-      res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>No speech detected.</Say><Record maxLength="10" playBeep="true" action="' + BASE_URL + '/process-user?callId=' + callId + '" /></Response>');
-      return;
-    }
-    
-    console.log(`User said: "${transcription.text}"`);
-    
-    const translation = await openai.chat.completions.create({
-      model: 'gpt-4',
-      messages: [
-        { role: 'system', content: 'Translate to ' + languageMap[callData.targetLanguage].name + '. Output ONLY the translation.' },
-        { role: 'user', content: transcription.text }
-      ],
-      temperature: 0.3
-    });
-    
-    const translatedText = translation.choices[0].message.content.trim();
-    console.log(`Translated: "${translatedText}"`);
-    
-    res.type('text/xml');
-    res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Waiting for response.</Say><Pause length="15"/><Say>Your turn.</Say><Record maxLength="10" playBeep="true" action="' + BASE_URL + '/process-user?callId=' + callId + '" /></Response>');
-    
-  } catch (error) {
-    console.error('Process user error:', error);
+    console.error('Voice stream target error:', error);
     res.type('text/xml');
     res.send('<Response><Hangup /></Response>');
   }
@@ -347,7 +292,64 @@ app.post('/api/messages/send-simple', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Talk2 Server on port ${PORT}`);
-  console.log(`Ready for turn-based translation calls`);
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server, path: '/media-stream' });
+
+wss.on('connection', (ws, req) => {
+  console.log('WebSocket connection established');
+  
+  const url = new URL(req.url, 'http://localhost');
+  const callId = url.searchParams.get('callId');
+  const role = url.searchParams.get('role');
+  
+  if (!callId || !role) {
+    ws.close();
+    return;
+  }
+  
+  const callData = activeCalls.get(callId);
+  if (!callData) {
+    ws.close();
+    return;
+  }
+  
+  console.log('Media stream connected:', callId, role);
+  
+  ws.on('message', async (message) => {
+    try {
+      const msg = JSON.parse(message);
+      
+      if (msg.event === 'start') {
+        console.log('Stream started for', role);
+      }
+      
+      if (msg.event === 'media') {
+        const audioBuffer = role === 'user' ? callData.userAudioBuffer : callData.targetAudioBuffer;
+        audioBuffer.push(msg.media.payload);
+        
+        if (audioBuffer.length >= 150) {
+          const audioData = Buffer.from(audioBuffer.join(''), 'base64');
+          audioBuffer.length = 0;
+          
+          console.log('Processing audio chunk from', role);
+        }
+      }
+      
+      if (msg.event === 'stop') {
+        console.log('Stream stopped for', role);
+      }
+      
+    } catch (error) {
+      console.error('WebSocket message error:', error);
+    }
+  });
+  
+  ws.on('close', () => {
+    console.log('WebSocket closed for', role);
+  });
+});
+
+server.listen(PORT, () => {
+  console.log('Talk2 Server with Media Streams on port ' + PORT);
+  console.log('WebSocket ready for real-time translation');
 });
