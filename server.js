@@ -173,17 +173,20 @@ app.post('/voice-stream-user', async (req, res) => {
     res.type('text/xml');
     res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Connecting with real time translation</Say><Start><Stream url="' + wsUrl + '" /></Start><Say>You can speak naturally. Translation happens in real time.</Say><Pause length="3600"/></Response>');
     
-    setTimeout(async () => {
-      try {
-        await twilioClient.calls.create({
-          url: BASE_URL + '/voice-stream-target?callId=' + callId,
-          to: callData.targetPhone,
-          from: process.env.TWILIO_PHONE_NUMBER
-        });
-      } catch (err) {
-        console.error('Target call error:', err);
-      }
-    }, 3000);
+setTimeout(async () => {
+  console.log('Attempting to call target:', callData.targetPhone);
+  try {
+    const targetCall = await twilioClient.calls.create({
+      url: BASE_URL + '/voice-stream-target?callId=' + callId,
+      to: callData.targetPhone,
+      from: process.env.TWILIO_PHONE_NUMBER
+    });
+    console.log('Target call initiated:', targetCall.sid);
+  } catch (err) {
+    console.error('Target call FAILED:', err.message);
+    console.error('Full error:', JSON.stringify(err, null, 2));
+  }
+}, 3000);
     
   } catch (error) {
     console.error('Voice stream user error:', error);
