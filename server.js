@@ -17,6 +17,7 @@ const MONGODB_URI = process.env.MONGODB_URI;
 const BASE_URL = 'https://web-production-38c0e.up.railway.app';
 
 let db = null;
+const activeCalls = new Map();
 
 async function connectDB() {
   if (db) return db;
@@ -123,85 +124,152 @@ app.post('/api/call/initiate', async (req, res) => {
   try {
     const { userPhone, targetPhone, sourceLanguage } = req.body;
     const cleanTargetPhone = targetPhone.replace(/[\s\(\)\-]/g, '');
-    console.log(`Call: ${userPhone} -> ${cleanTargetPhone} (${sourceLanguage})`);
-    const call = await twilioClient.calls.create({ url: `${BASE_URL}/voice-user?source=${sourceLanguage}&target=${encodeURIComponent(cleanTargetPhone)}`, to: userPhone, from: process.env.TWILIO_PHONE_NUMBER });
-    console.log(`Call initiated: ${call.sid}`);
-    res.json({ success: true, callSid: call.sid, message: 'Calling you now!' });
+    const callId = Date.now().toString();
+    
+    activeCalls.set(callId, {
+      userPhone: userPhone,
+      targetPhone: cleanTargetPhone,
+      userLanguage: sourceLanguage,
+      targetLanguage: sourceLanguage === 'es' ? 'en' : 'es',
+      currentSpeaker: 'user',
+      userConnected: false,
+      targetConnected: false
+    });
+    
+    console.log(`Initiating call ${callId}: ${userPhone} -> ${cleanTargetPhone}`);
+    
+    const call = await twilioClient.calls.create({
+      url: BASE_URL + '/connect-user?callId=' + callId,
+      to: userPhone,
+      from: process.env.TWILIO_PHONE_NUMBER
+    });
+    
+    res.json({ success: true, callSid: call.sid, callId: callId });
   } catch (error) {
     console.error('Call error:', error);
-    res.json({ error: error.message || 'Failed to initiate call' });
+    res.json({ error: error.message });
   }
 });
 
-app.post('/voice-user', async (req, res) => {
+app.post('/connect-user', async (req, res) => {
   try {
-    const source = req.query.source || 'es';
-    const targetPhone = req.query.target;
-    console.log(`User answered, connecting to ${targetPhone}`);
+    const callId = req.query.callId;
+    const callData = activeCalls.get(callId);
+    
+    if (!callData) {
+      res.type('text/xml');
+      res.send('<Response><Say>Call expired</Say><Hangup /></Response>');
+      return;
+    }
+    
+    callData.userConnected = true;
+    console.log(`User connected to call ${callId}`);
+    
     res.type('text/xml');
-    res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Connecting your call with translation. You will hear a beep when it is your turn to speak.</Say><Dial callerId="' + process.env.TWILIO_PHONE_NUMBER + '"><Number url="' + BASE_URL + '/other-party?source=' + source + '">' + targetPhone + '</Number></Dial></Response>');
+    res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Connecting your call with translation.</Say><Pause length="1"/><Say>After the beep, speak your message.</Say><Record maxLength="10" playBeep="true" action="' + BASE_URL + '/process-user?callId=' + callId + '" /></Response>');
+    
+    setTimeout(async () => {
+      try {
+        await twilioClient.calls.create({
+          url: BASE_URL + '/connect-target?callId=' + callId,
+          to: callData.targetPhone,
+          from: process.env.TWILIO_PHONE_NUMBER
+        });
+      } catch (err) {
+        console.error('Target call error:', err);
+      }
+    }, 2000);
+    
   } catch (error) {
-    console.error('Voice user error:', error);
-    res.type('text/xml');
-    res.send('<Response><Say>Error</Say><Hangup /></Response>');
-  }
-});
-
-app.post('/other-party', async (req, res) => {
-  try {
-    const source = req.query.source || 'es';
-    const target = source === 'es' ? 'en' : 'es';
-    console.log(`Other party answered`);
-    res.type('text/xml');
-    res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Connected. After the beep, speak your message.</Say><Record maxLength="10" playBeep="true" transcribe="false" action="' + BASE_URL + '/translate-and-play?source=' + target + '&target=' + source + '&party=other" /></Response>');
-  } catch (error) {
-    console.error('Other party error:', error);
+    console.error('Connect user error:', error);
     res.type('text/xml');
     res.send('<Response><Hangup /></Response>');
   }
 });
 
-app.post('/translate-and-play', async (req, res) => {
+app.post('/connect-target', async (req, res) => {
   try {
-    const { RecordingSid } = req.body;
-    const { source, target, party } = req.query;
-    console.log(`Processing recording from ${party}: ${RecordingSid}`);
-    if (!RecordingSid) {
+    const callId = req.query.callId;
+    const callData = activeCalls.get(callId);
+    
+    if (!callData) {
       res.type('text/xml');
-      res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>No audio detected. Try again.</Say><Record maxLength="10" playBeep="true" action="' + BASE_URL + '/translate-and-play?source=' + source + '&target=' + target + '&party=' + party + '" /></Response>');
+      res.send('<Response><Hangup /></Response>');
       return;
     }
+    
+    callData.targetConnected = true;
+    console.log(`Target connected to call ${callId}`);
+    
+    res.type('text/xml');
+    res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Connected. Waiting for translation.</Say><Pause length="30"/></Response>');
+    
+  } catch (error) {
+    console.error('Connect target error:', error);
+    res.type('text/xml');
+    res.send('<Response><Hangup /></Response>');
+  }
+});
+
+app.post('/process-user', async (req, res) => {
+  try {
+    const callId = req.query.callId;
+    const { RecordingSid } = req.body;
+    const callData = activeCalls.get(callId);
+    
+    if (!callData || !RecordingSid) {
+      res.type('text/xml');
+      res.send('<Response><Say>Error</Say><Hangup /></Response>');
+      return;
+    }
+    
+    console.log(`Processing user recording for call ${callId}`);
+    
     const tmpFile = `/tmp/rec_${Date.now()}.wav`;
     const downloadUrl = `https://api.twilio.com/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Recordings/${RecordingSid}.wav`;
     const file = fs.createWriteStream(tmpFile);
+    
     await new Promise((resolve, reject) => {
-      const auth = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
-      https.get(downloadUrl, { headers: { 'Authorization': `Basic ${auth}` } }, (response) => {
+      const auth = Buffer.from(process.env.TWILIO_ACCOUNT_SID + ':' + process.env.TWILIO_AUTH_TOKEN).toString('base64');
+      https.get(downloadUrl, { headers: { 'Authorization': 'Basic ' + auth } }, (response) => {
         response.pipe(file);
         file.on('finish', () => { file.close(); resolve(); });
       }).on('error', reject);
     });
-    const transcription = await openai.audio.transcriptions.create({ file: fs.createReadStream(tmpFile), model: 'whisper-1' });
+    
+    const transcription = await openai.audio.transcriptions.create({
+      file: fs.createReadStream(tmpFile),
+      model: 'whisper-1'
+    });
     fs.unlinkSync(tmpFile);
+    
     if (!transcription.text || transcription.text.trim().length === 0) {
       res.type('text/xml');
-      res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>No speech detected.</Say><Record maxLength="10" playBeep="true" action="' + BASE_URL + '/translate-and-play?source=' + source + '&target=' + target + '&party=' + party + '" /></Response>');
+      res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>No speech detected.</Say><Record maxLength="10" playBeep="true" action="' + BASE_URL + '/process-user?callId=' + callId + '" /></Response>');
       return;
     }
-    const detectedLang = transcription.language || source;
-    console.log(`Transcribed (${detectedLang}): "${transcription.text}"`);
-    const translation = await openai.chat.completions.create({ model: 'gpt-4', messages: [{ role: 'system', content: `Translate from ${languageMap[detectedLang]?.name || 'detected language'} to ${languageMap[target].name}. Output ONLY the translation.` }, { role: 'user', content: transcription.text }], temperature: 0.3 });
+    
+    console.log(`User said: "${transcription.text}"`);
+    
+    const translation = await openai.chat.completions.create({
+      model: 'gpt-4',
+      messages: [
+        { role: 'system', content: 'Translate to ' + languageMap[callData.targetLanguage].name + '. Output ONLY the translation.' },
+        { role: 'user', content: transcription.text }
+      ],
+      temperature: 0.3
+    });
+    
     const translatedText = translation.choices[0].message.content.trim();
-    console.log(`Translated (${target}): "${translatedText}"`);
-    const nextParty = party === 'user' ? 'other' : 'user';
-    const nextSource = target;
-    const nextTarget = source;
+    console.log(`Translated: "${translatedText}"`);
+    
     res.type('text/xml');
-    res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>' + translatedText.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</Say><Say>Your turn. Speak after the beep.</Say><Record maxLength="10" playBeep="true" action="' + BASE_URL + '/translate-and-play?source=' + nextSource + '&target=' + nextTarget + '&party=' + nextParty + '" /></Response>');
+    res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Waiting for response.</Say><Pause length="15"/><Say>Your turn.</Say><Record maxLength="10" playBeep="true" action="' + BASE_URL + '/process-user?callId=' + callId + '" /></Response>');
+    
   } catch (error) {
-    console.error('Translate error:', error);
+    console.error('Process user error:', error);
     res.type('text/xml');
-    res.send('<Response><Say>Error</Say><Hangup /></Response>');
+    res.send('<Response><Hangup /></Response>');
   }
 });
 
@@ -212,7 +280,7 @@ app.get('/api/chats/:userId', async (req, res) => {
     const conversations = await db.collection('conversations').find({ participants: userId }).sort({ lastMessageAt: -1 }).toArray();
     res.json({ success: true, conversations });
   } catch (error) {
-    res.json({ error: 'Failed to get chats' });
+    res.json({ error: 'Failed' });
   }
 });
 
@@ -223,7 +291,7 @@ app.get('/api/messages/:conversationId', async (req, res) => {
     const messages = await db.collection('messages').find({ conversationId }).sort({ createdAt: 1 }).limit(100).toArray();
     res.json({ success: true, messages });
   } catch (error) {
-    res.json({ error: 'Failed to get messages' });
+    res.json({ error: 'Failed' });
   }
 });
 
@@ -240,7 +308,7 @@ app.post('/api/messages/send', async (req, res) => {
     const recipientLanguage = recipient?.preferredLanguage || 'en';
     let translatedText = text;
     if (senderLanguage !== recipientLanguage) {
-      const translation = await openai.chat.completions.create({ model: 'gpt-4', messages: [{ role: 'system', content: `Translate to ${languageMap[recipientLanguage].name}.` }, { role: 'user', content: text }], temperature: 0.3 });
+      const translation = await openai.chat.completions.create({ model: 'gpt-4', messages: [{ role: 'system', content: 'Translate to ' + languageMap[recipientLanguage].name }, { role: 'user', content: text }], temperature: 0.3 });
       translatedText = translation.choices[0].message.content.trim();
     }
     const message = { conversationId: conversation._id.toString(), senderId, recipientId, originalText: text, originalLanguage: senderLanguage, translatedText, translatedLanguage: recipientLanguage, createdAt: new Date(), read: false };
@@ -248,7 +316,7 @@ app.post('/api/messages/send', async (req, res) => {
     await db.collection('conversations').updateOne({ _id: conversation._id }, { $set: { lastMessageAt: new Date(), lastMessage: translatedText } });
     res.json({ success: true, message: { ...message, _id: messageResult.insertedId } });
   } catch (error) {
-    res.json({ error: 'Failed to send message' });
+    res.json({ error: 'Failed' });
   }
 });
 
@@ -269,7 +337,7 @@ app.post('/api/messages/send-simple', async (req, res) => {
     const targetLanguage = 'en';
     let translatedText = text;
     if (senderLanguage !== targetLanguage) {
-      const translation = await openai.chat.completions.create({ model: 'gpt-4', messages: [{ role: 'system', content: `Translate to ${languageMap[targetLanguage].name}.` }, { role: 'user', content: text }], temperature: 0.3 });
+      const translation = await openai.chat.completions.create({ model: 'gpt-4', messages: [{ role: 'system', content: 'Translate to ' + languageMap[targetLanguage].name }, { role: 'user', content: text }], temperature: 0.3 });
       translatedText = translation.choices[0].message.content.trim();
     }
     const message = { _id: Date.now().toString(), senderPhone, recipientPhone, originalText: text, originalLanguage: senderLanguage, translatedText, translatedLanguage: targetLanguage, createdAt: new Date().toISOString() };
@@ -281,5 +349,5 @@ app.post('/api/messages/send-simple', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Talk2 Server on port ${PORT}`);
-  console.log(`Chat: ✅ Voice: ✅ Translation: ✅`);
+  console.log(`Ready for turn-based translation calls`);
 });
