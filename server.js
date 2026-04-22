@@ -122,19 +122,10 @@ app.post('/api/generate-token', async (req, res) => {
 app.post('/api/call/initiate', async (req, res) => {
   try {
     const { userPhone, targetPhone, sourceLanguage } = req.body;
-    
-    // Clean phone numbers (remove spaces, parentheses, dashes)
     const cleanTargetPhone = targetPhone.replace(/[\s\(\)\-]/g, '');
-    
-    console.log(`📞 Call: ${userPhone} -> ${cleanTargetPhone} (${sourceLanguage})`);
-    
-    const call = await twilioClient.calls.create({
-      url: `${BASE_URL}/voice-user?source=${sourceLanguage}&target=${encodeURIComponent(cleanTargetPhone)}`,
-      to: userPhone,
-      from: process.env.TWILIO_PHONE_NUMBER
-    });
-    
-    console.log(`✅ Call initiated: ${call.sid}`);
+    console.log(`Call: ${userPhone} -> ${cleanTargetPhone} (${sourceLanguage})`);
+    const call = await twilioClient.calls.create({ url: `${BASE_URL}/voice-user?source=${sourceLanguage}&target=${encodeURIComponent(cleanTargetPhone)}`, to: userPhone, from: process.env.TWILIO_PHONE_NUMBER });
+    console.log(`Call initiated: ${call.sid}`);
     res.json({ success: true, callSid: call.sid, message: 'Calling you now!' });
   } catch (error) {
     console.error('Call error:', error);
@@ -146,42 +137,38 @@ app.post('/voice-user', async (req, res) => {
   try {
     const source = req.query.source || 'es';
     const targetPhone = req.query.target;
-    console.log(`User answered, calling ${targetPhone}`);
-    const twiml = '<?xml version="1.0" encoding="UTF-8"?><Response><Say>Connecting with translation.</Say><Dial action="' + BASE_URL + '/translation-loop?source=' + source + '"><Number>' + targetPhone + '</Number></Dial></Response>';
+    console.log(`User answered, connecting to ${targetPhone}`);
     res.type('text/xml');
-    res.send(twiml);
+    res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Connecting your call with translation. You will hear a beep when it is your turn to speak.</Say><Dial callerId="' + process.env.TWILIO_PHONE_NUMBER + '"><Number url="' + BASE_URL + '/other-party?source=' + source + '">' + targetPhone + '</Number></Dial></Response>');
   } catch (error) {
-    console.error('Voice error:', error);
+    console.error('Voice user error:', error);
     res.type('text/xml');
     res.send('<Response><Say>Error</Say><Hangup /></Response>');
   }
 });
 
-app.post('/translation-loop', async (req, res) => {
+app.post('/other-party', async (req, res) => {
   try {
-    const { DialCallStatus } = req.body;
-    const source = req.query.source;
-    if (DialCallStatus === 'completed' || DialCallStatus === 'no-answer') {
-      res.type('text/xml');
-      res.send('<Response><Say>Call ended.</Say></Response>');
-      return;
-    }
-    const twiml = '<?xml version="1.0" encoding="UTF-8"?><Response><Say>After the beep, speak.</Say><Record maxLength="10" playBeep="true" action="' + BASE_URL + '/process-translation?source=' + source + '&target=en" /></Response>';
+    const source = req.query.source || 'es';
+    const target = source === 'es' ? 'en' : 'es';
+    console.log(`Other party answered`);
     res.type('text/xml');
-    res.send(twiml);
+    res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Connected. After the beep, speak your message.</Say><Record maxLength="10" playBeep="true" transcribe="false" action="' + BASE_URL + '/translate-and-play?source=' + target + '&target=' + source + '&party=other" /></Response>');
   } catch (error) {
+    console.error('Other party error:', error);
     res.type('text/xml');
     res.send('<Response><Hangup /></Response>');
   }
 });
 
-app.post('/process-translation', async (req, res) => {
+app.post('/translate-and-play', async (req, res) => {
   try {
     const { RecordingSid } = req.body;
-    const { source, target } = req.query;
+    const { source, target, party } = req.query;
+    console.log(`Processing recording from ${party}: ${RecordingSid}`);
     if (!RecordingSid) {
       res.type('text/xml');
-      res.send('<Response><Hangup /></Response>');
+      res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>No audio detected. Try again.</Say><Record maxLength="10" playBeep="true" action="' + BASE_URL + '/translate-and-play?source=' + source + '&target=' + target + '&party=' + party + '" /></Response>');
       return;
     }
     const tmpFile = `/tmp/rec_${Date.now()}.wav`;
@@ -198,21 +185,23 @@ app.post('/process-translation', async (req, res) => {
     fs.unlinkSync(tmpFile);
     if (!transcription.text || transcription.text.trim().length === 0) {
       res.type('text/xml');
-      res.send('<Response><Hangup /></Response>');
+      res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>No speech detected.</Say><Record maxLength="10" playBeep="true" action="' + BASE_URL + '/translate-and-play?source=' + source + '&target=' + target + '&party=' + party + '" /></Response>');
       return;
     }
     const detectedLang = transcription.language || source;
-    console.log(`Transcribed: "${transcription.text}"`);
-    const translation = await openai.chat.completions.create({ model: 'gpt-4', messages: [{ role: 'system', content: `Translate to ${languageMap[target].name}. Output ONLY translation.` }, { role: 'user', content: transcription.text }], temperature: 0.3 });
+    console.log(`Transcribed (${detectedLang}): "${transcription.text}"`);
+    const translation = await openai.chat.completions.create({ model: 'gpt-4', messages: [{ role: 'system', content: `Translate from ${languageMap[detectedLang]?.name || 'detected language'} to ${languageMap[target].name}. Output ONLY the translation.` }, { role: 'user', content: transcription.text }], temperature: 0.3 });
     const translatedText = translation.choices[0].message.content.trim();
-    console.log(`Translated: "${translatedText}"`);
-    const twiml = '<?xml version="1.0" encoding="UTF-8"?><Response><Say>' + translatedText.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</Say><Record maxLength="10" playBeep="true" action="' + BASE_URL + '/process-translation?source=' + target + '&target=' + source + '" /></Response>';
+    console.log(`Translated (${target}): "${translatedText}"`);
+    const nextParty = party === 'user' ? 'other' : 'user';
+    const nextSource = target;
+    const nextTarget = source;
     res.type('text/xml');
-    res.send(twiml);
+    res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>' + translatedText.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</Say><Say>Your turn. Speak after the beep.</Say><Record maxLength="10" playBeep="true" action="' + BASE_URL + '/translate-and-play?source=' + nextSource + '&target=' + nextTarget + '&party=' + nextParty + '" /></Response>');
   } catch (error) {
-    console.error('Translation error:', error);
+    console.error('Translate error:', error);
     res.type('text/xml');
-    res.send('<Response><Hangup /></Response>');
+    res.send('<Response><Say>Error</Say><Hangup /></Response>');
   }
 });
 
@@ -274,9 +263,23 @@ app.post('/api/messages/read', async (req, res) => {
   }
 });
 
+app.post('/api/messages/send-simple', async (req, res) => {
+  try {
+    const { senderPhone, recipientPhone, text, senderLanguage } = req.body;
+    const targetLanguage = 'en';
+    let translatedText = text;
+    if (senderLanguage !== targetLanguage) {
+      const translation = await openai.chat.completions.create({ model: 'gpt-4', messages: [{ role: 'system', content: `Translate to ${languageMap[targetLanguage].name}.` }, { role: 'user', content: text }], temperature: 0.3 });
+      translatedText = translation.choices[0].message.content.trim();
+    }
+    const message = { _id: Date.now().toString(), senderPhone, recipientPhone, originalText: text, originalLanguage: senderLanguage, translatedText, translatedLanguage: targetLanguage, createdAt: new Date().toISOString() };
+    res.json({ success: true, message });
+  } catch (error) {
+    res.json({ error: 'Failed' });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Talk2 Server on port ${PORT}`);
-  console.log(`Chat: ✅`);
-  console.log(`Voice: ✅`);
-  console.log(`Translation: ✅`);
+  console.log(`Chat: ✅ Voice: ✅ Translation: ✅`);
 });
