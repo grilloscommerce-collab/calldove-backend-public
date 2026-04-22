@@ -348,7 +348,14 @@ app.post('/api/messages/send-simple', async (req, res) => {
 });
 
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server, path: '/media-stream' });
+const wss = new WebSocket.Server({ 
+  server: server,
+  path: '/media-stream',
+  verifyClient: (info) => {
+    console.log('WebSocket verification:', info.req.url);
+    return true;
+  }
+});
 
 wss.on('connection', (ws, req) => {
   console.log('WebSocket connection established');
