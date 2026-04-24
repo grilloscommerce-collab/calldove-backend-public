@@ -168,7 +168,7 @@ app.post('/voice-stream-user', async (req, res) => {
     callData.userCallSid = req.body.CallSid;
     console.log('User connected to streaming call:', callId);
 
-    const wsUrl = BASE_URL.replace('https://', 'wss://') + '/media-stream?callId=' + callId + '&role=user';
+    const wsUrl = BASE_URL.replace('https://', 'wss://') + '/media-stream?callId=' + callId + '&amp;role=user';
 
     res.type('text/xml');
     res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Start><Stream url="' + wsUrl + '" /></Start><Pause length="3600"/></Response>');
@@ -209,7 +209,7 @@ app.post('/voice-stream-target', async (req, res) => {
     callData.targetCallSid = req.body.CallSid;
     console.log('Target connected to streaming call:', callId);
 
-    const wsUrl = BASE_URL.replace('https://', 'wss://') + '/media-stream?callId=' + callId + '&role=target';
+    const wsUrl = BASE_URL.replace('https://', 'wss://') + '/media-stream?callId=' + callId + '&amp;role=target';
 
     res.type('text/xml');
     res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Start><Stream url="' + wsUrl + '" /></Start><Pause length="3600"/></Response>');
