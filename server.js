@@ -16,7 +16,7 @@ const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_A
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const PORT = process.env.PORT || 3000;
 const MONGODB_URI = process.env.MONGODB_URI;
-const BASE_URL = 'https://web-production-38c0e.up.railway.app';
+const BASE_URL = process.env.BASE_URL || 'https://talk2-backend.onrender.com';
 
 let db = null;
 const activeCalls = new Map();
