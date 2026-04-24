@@ -168,7 +168,8 @@ app.post('/voice-stream-user', async (req, res) => {
     callData.userCallSid = req.body.CallSid;
     console.log('User connected to streaming call:', callId);
 
-    const wsUrl = BASE_URL.replace('https://', 'wss://') + '/media-stream?callId=' + callId + '&amp;role=user';
+    const wsUrl = BASE_URL.replace('https://', 'wss://') + '/media-stream?callId=' + callId + '&role=user';
+    console.log('User WebSocket URL:', wsUrl);
 
     res.type('text/xml');
     res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Start><Stream url="' + wsUrl + '" /></Start><Pause length="3600"/></Response>');
@@ -184,7 +185,6 @@ app.post('/voice-stream-user', async (req, res) => {
         console.log('Target call initiated:', targetCall.sid);
       } catch (err) {
         console.error('Target call FAILED:', err.message);
-        console.error('Full error:', JSON.stringify(err, null, 2));
       }
     }, 3000);
 
@@ -209,7 +209,8 @@ app.post('/voice-stream-target', async (req, res) => {
     callData.targetCallSid = req.body.CallSid;
     console.log('Target connected to streaming call:', callId);
 
-    const wsUrl = BASE_URL.replace('https://', 'wss://') + '/media-stream?callId=' + callId + '&amp;role=target';
+    const wsUrl = BASE_URL.replace('https://', 'wss://') + '/media-stream?callId=' + callId + '&role=target';
+    console.log('Target WebSocket URL:', wsUrl);
 
     res.type('text/xml');
     res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Start><Stream url="' + wsUrl + '" /></Start><Pause length="3600"/></Response>');
@@ -351,25 +352,30 @@ const wss = new WebSocket.Server({
   server: server,
   path: '/media-stream',
   verifyClient: (info) => {
-    console.log('WebSocket verification:', info.req.url);
+    console.log('WebSocket incoming URL:', info.req.url);
     return true;
   }
 });
 
 wss.on('connection', (ws, req) => {
-  console.log('WebSocket connection established');
+  console.log('WebSocket connection established, URL:', req.url);
 
   const url = new URL(req.url, 'http://localhost');
   const callId = url.searchParams.get('callId');
   const role = url.searchParams.get('role');
 
+  console.log('Parsed callId:', callId, 'role:', role);
+  console.log('Active calls:', Array.from(activeCalls.keys()));
+
   if (!callId || !role) {
+    console.log('CLOSING - missing callId or role');
     ws.close();
     return;
   }
 
   const callData = activeCalls.get(callId);
   if (!callData) {
+    console.log('CLOSING - no callData for callId:', callId);
     ws.close();
     return;
   }
@@ -391,9 +397,7 @@ wss.on('connection', (ws, req) => {
         if (audioBuffer.length >= 150) {
           const audioData = Buffer.from(audioBuffer.join(''), 'base64');
           audioBuffer.length = 0;
-
           console.log('Processing audio chunk from', role, '- size:', audioData.length);
-
           processAudioChunk(audioData, callId, role).catch(err => {
             console.error('Audio processing error:', err);
           });
